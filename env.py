@@ -30,8 +30,12 @@ class BelotEnv:
         self.phase = "BIDDING"
         self.bidding_round = 1
         self.passes_in_round = 0
+        
         self.trump = None
         self.declarer = None
+        self.declaring_team = None
+        self.defending_team = None
+        self.declarer_has_played_trump = False
         
         # Tricks tracking
         self.tricks_played = 0
@@ -45,7 +49,8 @@ class BelotEnv:
         # Forced Jack Exception
         if self.face_up_rank == 4: # Jack
             self.trump = self.face_up_suit
-            self.declarer = self.current_player # TODO: If the face up is Jack, the player next to the dealer becomes the declarer
+            # The player next to the dealer becomes declarer
+            self.declarer = (self.dealer + 1) % self.num_players
             self._finalize_bidding()
             
         return self._get_observation()
@@ -53,10 +58,15 @@ class BelotEnv:
     def _finalize_bidding(self):
         """Called when a trump is chosen. Deals remaining cards."""
         self.phase = "PLAYING"
-        # Deal remaining cards: Declarer gets face-up card + 2 more. Others get 3 more. TODO: If we are in bidding phase 1: the declarer takes the 
-        # face up card. If in phase 2, no matter who chooses the trump the dealer takes the phase up card
+        self.declaring_team = self.declarer % 2
+        self.defending_team = 1 - self.declaring_team
+        
+        # If bidding round 1: Declarer gets face up card.
+        # If bidding round 2: Dealer gets face up card.
+        face_up_recipient = self.declarer if self.bidding_round == 1 else self.dealer
+
         for p in range(self.num_players):
-            if p == self.declarer:
+            if p == face_up_recipient:
                 self.hands[p].append(self.face_up_card)
                 self.hands[p].extend(self.deck[:2])
                 self.deck = self.deck[2:]
@@ -75,7 +85,11 @@ class BelotEnv:
             return legal
             
         if self.phase == "BIDDING":
-            legal[32] = True # Pass is always an option in bidding TODO: if in bidding round 2 the dealer cannot pass, he must choose a suit but not the face up suit
+            if self.bidding_round == 2 and self.current_player == self.dealer:
+                legal[32] = False # Dealer cannot pass in round 2
+            else:
+                legal[32] = True # Pass
+                
             if self.bidding_round == 1:
                 legal[33] = True # Accept
             elif self.bidding_round == 2:
@@ -87,10 +101,18 @@ class BelotEnv:
         elif self.phase == "PLAYING":
             hand = self.hands[self.current_player]
             
-            # If leading the trick, can play any card TODO: not quite, if the declarer has yet to enter a trick with a trump, others cannot
-            # enter with trump. In other word, the declarer is the first one to enter with a trump. Exception: If a player has only trump, he can play any trump
+            # If leading the trick
             if len(self.current_trick) == 0:
+                # Check Trump restriction for non-declarers
+                can_lead_trump = True
+                if not self.declarer_has_played_trump and self.current_player != self.declarer:
+                    # Exception: If player has ONLY trumps
+                    if not all(c // 8 == self.trump for c in hand):
+                        can_lead_trump = False
+
                 for card in hand:
+                    if card // 8 == self.trump and not can_lead_trump:
+                        continue # Illegal to lead trump right now
                     legal[card] = True
                 return legal
                 
@@ -109,12 +131,22 @@ class BelotEnv:
                 card_suit = card // 8
                 card_val = self._get_card_value(card, is_trump=(card_suit == self.trump))[1]
                 
-                if has_led_suit: # TODO: Lead suit can be trump, so this would make all cards of the trump suit legal, without any respect for overruffing
+                if has_led_suit:
                     if card_suit == led_suit:
-                        legal[card] = True
+                        if led_suit == self.trump:
+                            # Overruff applies even when following a led trump!
+                            can_overruff = any(c // 8 == self.trump and self._get_card_value(c, True)[1] > highest_trick_trump_val for c in hand) # TODO: check flag only once, not for every 
+                            # card, as it does now (Optimization I think, I am not sure)
+                            if can_overruff:
+                                if card_val > highest_trick_trump_val:
+                                    legal[card] = True
+                            else:
+                                legal[card] = True
+                        else:
+                            legal[card] = True
                 elif has_trump:
                     if card_suit == self.trump:
-                        # Overruff rule: Must play a higher trump if possible
+                        # Overruff rule when Ruffing
                         can_overruff = any(c // 8 == self.trump and self._get_card_value(c, True)[1] > highest_trick_trump_val for c in hand)
                         if can_overruff:
                             if card_val > highest_trick_trump_val:
@@ -122,7 +154,7 @@ class BelotEnv:
                         else:
                             legal[card] = True # Have to play trump, but can't overruff
                 else:
-                    # Discard: No led suit, no trumps
+                    # Discard
                     legal[card] = True
                     
         return legal
@@ -139,7 +171,6 @@ class BelotEnv:
         reward = [0, 0, 0, 0]
         if self.done:
             reward = self._calculate_final_rewards()
-            # Rotate dealer for next game organically
             self.dealer = (self.dealer + 1) % self.num_players
 
         return self._get_observation(), reward, self.done, {}
@@ -147,17 +178,15 @@ class BelotEnv:
     def _handle_bidding_action(self, action):
         if action == 32: # Pass
             self.passes_in_round += 1
-            if self.passes_in_round == 4:
-                if self.bidding_round == 1:
-                    self.bidding_round = 2
-                    self.passes_in_round = 0
-                else:
-                    # 4 passes in second round -> Redeal (done, 0 points) TODO: There can not be 4 passes in round 2, the dealer has to choose a suit
-                    self.done = True
+            if self.passes_in_round == 4 and self.bidding_round == 1:
+                self.bidding_round = 2
+                self.passes_in_round = 0
+                
         elif action == 33: # Accept
             self.trump = self.face_up_suit
             self.declarer = self.current_player
             self._finalize_bidding()
+            
         elif 34 <= action <= 37: # Choose Suit
             self.trump = action - 34
             self.declarer = self.current_player
@@ -168,6 +197,11 @@ class BelotEnv:
 
     def _handle_playing_action(self, action):
         card = action
+        
+        # Track if declarer breaks trump
+        if self.current_player == self.declarer and (card // 8 == self.trump):
+            self.declarer_has_played_trump = True
+
         self.hands[self.current_player].remove(card)
         self.current_trick.append((self.current_player, card))
         
@@ -187,12 +221,8 @@ class BelotEnv:
             self.current_trick = []
 
             if self.tricks_played == 8:
-                # Hand over, calculate Pasledu and Finish
-                # Pasledu Rule: If winner of last trick is NOT the declarer, their team gets 10 raw points TODO: not quite,
-                # The team who gets the last trick gets 10 points. The 'NOT the declarer' part is there because when we go from points to 'bile' we use the round rule for the team
-                # who did not choose the trump, and calculate the bile for the winning team by doing 16 - the losing team's bile. 
-                if winner != self.declarer:
-                    self.raw_points_by_team[winning_team] += 10
+                # Pasledu: ALWAYS 10 points to the team that wins the last trick
+                self.raw_points_by_team[winning_team] += 10
                 self.done = True
 
     def _evaluate_trick(self):
@@ -239,27 +269,32 @@ class BelotEnv:
         return points_map[rank], rank_map[rank]
 
     def _calculate_final_rewards(self):
-        """Calculates MARL team rewards utilizing the specific 'Bile' conversion."""
-        if sum(self.tricks_won_by_team) == 0: # TODO: What is this? How can this be?
-            return [0, 0, 0, 0] # Redeal edge case
-            
         game_points = [0, 0]
         
         for team in range(2):
             if self.tricks_won_by_team[team] == 0:
-                game_points[team] = -10 # Zero tricks penalty
-            else:
-                raw = self.raw_points_by_team[team]
-                # Bile Rounding logic: ending in 5 rounds down (35->3), ending in 6 rounds up (66->7)
-                remainder = raw % 10
-                game_points[team] = (raw // 10) + (1 if remainder > 5 else 0)
-                
-        # Both partners share the exact same reward to ensure cooperative training
+                game_points[team] = -10 
+
+        if game_points[0] != -10 and game_points[1] != -10:
+            # Standard calculation: Find Bile for defending team
+            raw_def = self.raw_points_by_team[self.defending_team]
+            remainder = raw_def % 10
+            def_bile = (raw_def // 10) + (1 if remainder > 5 else 0)
+            
+            # Declaring team's Bile is 16 minus Defending Team's Bile
+            game_points[self.defending_team] = def_bile
+            game_points[self.declaring_team] = 16 - def_bile
+        
+        elif game_points[self.defending_team] == -10:
+            game_points[self.declaring_team] = 16
+        elif game_points[self.declaring_team] == -10:
+            game_points[self.defending_team] = 16
+
         return [
-            game_points[0], # P0
-            game_points[1], # P1
-            game_points[0], # P2
-            game_points[1]  # P3
+            game_points[0], 
+            game_points[1], 
+            game_points[0], 
+            game_points[1]  
         ]
 
     def _get_observation(self):
