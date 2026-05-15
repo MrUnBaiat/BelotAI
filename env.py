@@ -8,6 +8,7 @@ class BelotEnv:
         
         # Internal state
         self.dealer = 0
+        self.bolts_by_team = [0, 0] # Persists across hands (reset() does not wipe this)
         self.reset()
 
     def reset(self):
@@ -117,7 +118,7 @@ class BelotEnv:
                 return legal
                 
             # Following trick logic
-            led_card = self.current_trick[0][1] 
+            led_card = self.current_trick[0][1]
             led_suit = led_card // 8
             
             has_led_suit = any(c // 8 == led_suit for c in hand)
@@ -135,7 +136,7 @@ class BelotEnv:
                     if card_suit == led_suit:
                         if led_suit == self.trump:
                             # Overruff applies even when following a led trump!
-                            can_overruff = any(c // 8 == self.trump and self._get_card_value(c, True)[1] > highest_trick_trump_val for c in hand) # TODO: check flag only once, not for every 
+                            can_overruff = any(c // 8 == self.trump and self._get_card_value(c, is_trump=True)[1] > highest_trick_trump_val for c in hand) # TODO: check flag only once, not for every 
                             # card, as it does now (Optimization I think, I am not sure)
                             if can_overruff:
                                 if card_val > highest_trick_trump_val:
@@ -147,7 +148,7 @@ class BelotEnv:
                 elif has_trump:
                     if card_suit == self.trump:
                         # Overruff rule when Ruffing
-                        can_overruff = any(c // 8 == self.trump and self._get_card_value(c, True)[1] > highest_trick_trump_val for c in hand)
+                        can_overruff = any(c // 8 == self.trump and self._get_card_value(c, is_trump=True)[1] > highest_trick_trump_val for c in hand)
                         if can_overruff:
                             if card_val > highest_trick_trump_val:
                                 legal[card] = True
@@ -171,6 +172,8 @@ class BelotEnv:
         reward = [0, 0, 0, 0]
         if self.done:
             reward = self._calculate_final_rewards()
+            # Dealer rotation happens here, while persistent bolts remain intact
+            # TODO: Inspect how the points are added up to the greater global game score
             self.dealer = (self.dealer + 1) % self.num_players
 
         return self._get_observation(), reward, self.done, {}
@@ -270,26 +273,48 @@ class BelotEnv:
 
     def _calculate_final_rewards(self):
         game_points = [0, 0]
+        bolt_occurred = False
         
+        # 1. Zero Tricks Condition Check
         for team in range(2):
             if self.tricks_won_by_team[team] == 0:
                 game_points[team] = -10 
 
+        # 2. Score Computation (with Bolt Logic)
         if game_points[0] != -10 and game_points[1] != -10:
-            # Standard calculation: Find Bile for defending team
+            raw_dec = self.raw_points_by_team[self.declaring_team]
             raw_def = self.raw_points_by_team[self.defending_team]
-            remainder = raw_def % 10
-            def_bile = (raw_def // 10) + (1 if remainder > 5 else 0)
             
-            # Declaring team's Bile is 16 minus Defending Team's Bile
-            game_points[self.defending_team] = def_bile
-            game_points[self.declaring_team] = 16 - def_bile
+            # Bolt Condition Check: Total raw points is 162. If declarer gets <= 80, they fail.
+            if raw_dec <= 80:
+                game_points[self.declaring_team] = 0
+                game_points[self.defending_team] = 16
+                bolt_occurred = True
+            else:
+                # Standard calculation: Find Bile for defending team
+                remainder = raw_def % 10
+                def_bile = (raw_def // 10) + (1 if remainder > 5 else 0)
+                
+                game_points[self.defending_team] = def_bile
+                game_points[self.declaring_team] = 16 - def_bile
         
+        # Handing the Zero Trick Edge Cases vs Bolt
         elif game_points[self.defending_team] == -10:
+            # Defending team got 0 tricks
             game_points[self.declaring_team] = 16
         elif game_points[self.declaring_team] == -10:
+            # Declaring team got 0 tricks. They take the -10 zero-trick penalty, but it is ALSO a Bolt!
             game_points[self.defending_team] = 16
+            bolt_occurred = True
 
+        # 3. Apply the 3rd Bolt Penalty
+        if bolt_occurred:
+            self.bolts_by_team[self.declaring_team] += 1
+            if self.bolts_by_team[self.declaring_team] == 3:
+                game_points[self.declaring_team] -= 10
+                self.bolts_by_team[self.declaring_team] = 0 # Reset Bolt Counter
+
+        # Return Team 0 and Team 1 scores symmetrically mapped to P0, P1, P2, P3
         return [
             game_points[0], 
             game_points[1], 
@@ -304,5 +329,13 @@ class BelotEnv:
             "hand": self.hands[self.current_player],
             "trump": self.trump,
             "trick_history": self.trick_history,
-            "current_trick": self.current_trick
+            "current_trick": self.current_trick,
+            # EXPOSED TO PPO: Crucial for the agent to know if it's on its 2nd Bolt 
+            # so it can become highly risk-averse in Bidding.
+            "bolts_by_team": self.bolts_by_team.copy() 
         }
+        
+'''
+TODO:
+- Implement less than 14 game cancellation
+'''
