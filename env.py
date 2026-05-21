@@ -2,6 +2,7 @@ import numpy as np
 
 class BelotEnv:
     def __init__(self):
+        # This is the env for 1 episode (8 tricks) till Done = True. After which reset is called
         # Action Space: 0-31 for playing cards, 32=Pass, 33=Accept, 34-37=Pick Suit
         self.action_space_size = 38
         self.num_players = 4
@@ -272,6 +273,7 @@ class BelotEnv:
         return points_map[rank], rank_map[rank]
 
     def _calculate_final_rewards(self):
+        """This is run at the end of the episode (8 tricks)"""
         game_points = [0, 0]
         bolt_occurred = False
         
