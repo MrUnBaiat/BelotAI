@@ -47,7 +47,7 @@ def train():
         for _ in range(episodes_per_batch):
             env.reset()
             hidden_states = {
-                agent: (torch.zeros(1, 256, device=device), torch.zeros(1, 256, device=device))
+                agent: (torch.zeros(1, 1, 256, device=device), torch.zeros(1, 1, 256, device=device))
                 for agent in env.possible_agents
             }
             
@@ -103,35 +103,34 @@ def train():
         epoch_entropy = 0
         update_steps = 0
         
+        # --- 3. BATCHED PPO UPDATE LOOP (NO PYTHON TIME LOOP) ---
         for _ in range(ppo_iters):
             for agent in env.possible_agents:
                 buf = memory.buffers[agent]
                 if len(buf.obs) == 0: continue
                 
-                # Stack and move to GPU
-                b_obs = torch.stack(buf.obs).to(device)
-                b_masks = torch.stack(buf.masks).to(device)
+                # Stack individual steps into a single continuous sequence
+                # Shape: (1, Sequence_Length, 219) -> Treating the whole history as 1 big batch
+                b_obs = torch.stack(buf.obs).unsqueeze(0).to(device)
+                b_masks = torch.stack(buf.masks).unsqueeze(0).to(device)
                 b_actions = torch.tensor(buf.actions, device=device)
                 b_old_logprobs = torch.tensor(buf.logprobs, device=device)
                 b_returns = agent_returns[agent].to(device)
                 b_advantages = agent_advantages[agent].to(device)
                 
-                h_0 = buf.h_states[0].unsqueeze(0).to(device)
-                c_0 = buf.c_states[0].unsqueeze(0).to(device)
+                # Format hidden states for nn.LSTM -> (1, Batch, 256)
+                h_0 = buf.h_states[0].unsqueeze(0).unsqueeze(0).to(device)
+                c_0 = buf.c_states[0].unsqueeze(0).unsqueeze(0).to(device)
                 curr_hc = (h_0, c_0)
                 
-                new_logprobs, values, entropies = [], [], []
+                # CRITICAL: Execute the entire sequence simultaneously in CUDA C++
+                dist, values, _ = model(b_obs, curr_hc, b_masks, is_sequence=True)
                 
-                for t in range(len(b_obs)):
-                    dist, value, curr_hc = model(b_obs[t].unsqueeze(0), curr_hc, b_masks[t].unsqueeze(0))
-                    new_logprobs.append(dist.log_prob(b_actions[t]))
-                    values.append(value)
-                    entropies.append(dist.entropy())
-                    
-                new_logprobs = torch.cat(new_logprobs)
-                values = torch.cat(values).squeeze()
-                entropies = torch.cat(entropies)
+                values = values.squeeze()
+                new_logprobs = dist.log_prob(b_actions)
+                entropies = dist.entropy()
                 
+                # Calculate PPO losses seamlessly across the whole sequence at once
                 ratio = torch.exp(new_logprobs - b_old_logprobs)
                 surr1 = ratio * b_advantages
                 surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * b_advantages
@@ -140,7 +139,7 @@ def train():
                 critic_loss = F.mse_loss(values, b_returns)
                 entropy_loss = entropies.mean()
                 
-                total_loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy_loss
+                total_loss = actor_loss + 0.5 * critic_loss - 0.05 * entropy_loss
                 
                 optimizer.zero_grad()
                 total_loss.backward()
