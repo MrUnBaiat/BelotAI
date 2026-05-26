@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from torch.nn.utils.rnn import pad_sequence
 
 class AgentBuffer:
     def __init__(self):
@@ -42,6 +43,50 @@ class AgentBuffer:
             returns.insert(0, gae + values[step])
             
         return torch.tensor(returns, dtype=torch.float32), torch.tensor(advantages, dtype=torch.float32)
+    
+    def get_padded_batch(self, advantages, returns):
+        """Chunks flat buffer into padded episodes for proper BPTT."""
+        ep_obs, ep_masks, ep_actions, ep_logprobs = [], [], [], []
+        ep_adv, ep_ret, pad_masks = [], [], []
+        
+        cur_obs, cur_masks, cur_actions, cur_logprobs, cur_adv, cur_ret = [], [], [], [], [], []
+        
+        # 1. Split flat lists by episode using the 'done' flags
+        for i, done in enumerate(self.dones):
+            cur_obs.append(self.obs[i])
+            cur_masks.append(self.masks[i])
+            cur_actions.append(torch.tensor(self.actions[i]))
+            cur_logprobs.append(torch.tensor(self.logprobs[i]))
+            cur_adv.append(advantages[i])
+            cur_ret.append(returns[i])
+            
+            # If game ends, or we hit the end of the buffer, package the episode
+            if done or i == len(self.dones) - 1:
+                ep_obs.append(torch.stack(cur_obs))
+                ep_masks.append(torch.stack(cur_masks))
+                ep_actions.append(torch.stack(cur_actions))
+                ep_logprobs.append(torch.stack(cur_logprobs))
+                ep_adv.append(torch.stack(cur_adv))
+                ep_ret.append(torch.stack(cur_ret))
+                
+                # Create a sequence of 1s representing valid data steps
+                pad_masks.append(torch.ones(len(cur_actions)))
+                
+                # Reset current trackers for the next episode
+                cur_obs, cur_masks, cur_actions, cur_logprobs, cur_adv, cur_ret = [], [], [], [], [], []
+
+        # 2. Pad sequences to create rectangular tensors: (Batch, Seq_Len, ...)
+        b_obs = pad_sequence(ep_obs, batch_first=True)
+        b_masks = pad_sequence(ep_masks, batch_first=True, padding_value=1.0) # To avoid calculating logarithms of zero on the dummy padded steps.
+        b_actions = pad_sequence(ep_actions, batch_first=True)
+        b_logprobs = pad_sequence(ep_logprobs, batch_first=True)
+        b_adv = pad_sequence(ep_adv, batch_first=True)
+        b_ret = pad_sequence(ep_ret, batch_first=True)
+        
+        # 3. Pad the valid-data mask with 0s
+        b_pad_mask = pad_sequence(pad_masks, batch_first=True)
+
+        return b_obs, b_masks, b_actions, b_logprobs, b_adv, b_ret, b_pad_mask
 
 class MultiAgentMemory:
     def __init__(self, agents):

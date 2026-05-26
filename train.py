@@ -38,7 +38,7 @@ def train():
 
     epochs = 10000
     ppo_iters = 4
-    episodes_per_batch = 64
+    episodes_per_batch = 128
     clip_epsilon = 0.2
     
     for epoch in range(start_epoch, epochs):
@@ -63,7 +63,7 @@ def train():
                 
                 if termination or truncation:
                     if len(memory.buffers[agent].rewards) > 0:
-                        memory.buffers[agent].rewards[-1] = scaled_reward
+                        memory.buffers[agent].rewards[-1] = scaled_reward # should we use +=?
                         memory.buffers[agent].dones[-1] = True
                     env.step(None) 
                     continue
@@ -114,35 +114,49 @@ def train():
                 buf = memory.buffers[agent]
                 if len(buf.obs) == 0: continue
                 
-                # NOW we push the massive stacked blocks of data to the GPU all at once
-                b_obs = torch.stack(buf.obs).unsqueeze(0).to(device)
-                b_masks = torch.stack(buf.masks).unsqueeze(0).to(device)
-                b_actions = torch.tensor(buf.actions, device=device)
-                b_old_logprobs = torch.tensor(buf.logprobs, device=device)
-                b_returns = agent_returns[agent].to(device)
-                b_advantages = agent_advantages[agent].to(device)
+                # 1. Get properly batched and padded sequences
+                b_obs, b_masks, b_actions, b_old_logprobs, b_returns, b_advantages, pad_mask = buf.get_padded_batch(
+                    agent_advantages[agent], agent_returns[agent]
+                )
                 
-                h_0 = buf.h_states[0].unsqueeze(0).unsqueeze(0).to(device)
-                c_0 = buf.c_states[0].unsqueeze(0).unsqueeze(0).to(device)
+                # Move everything to GPU
+                b_obs = b_obs.to(device)
+                b_masks = b_masks.to(device)
+                b_actions = b_actions.to(device)
+                b_old_logprobs = b_old_logprobs.to(device)
+                b_returns = b_returns.to(device)
+                b_advantages = b_advantages.to(device)
+                pad_mask = pad_mask.to(device)
+                
+                # 2. Initialize FRESH hidden states for this specific batch of episodes
+                batch_size = b_obs.size(0)
+                h_0 = torch.zeros(1, batch_size, 256, device=device)
+                c_0 = torch.zeros(1, batch_size, 256, device=device)
                 curr_hc = (h_0, c_0)
                 
-                # Execute batched sequence through GPU
+                # 3. Execute batched sequence through GPU
                 dist, values, _ = model(b_obs, curr_hc, b_masks, is_sequence=True)
                 
-                values = values.squeeze()
+                values = values.squeeze(-1) # Ensure shape matches (Batch, SeqLen)
                 new_logprobs = dist.log_prob(b_actions)
                 entropies = dist.entropy()
                 
-                # Calculate PPO losses seamlessly across the whole sequence at once
+                # 4. Calculate PPO losses
                 ratio = torch.exp(new_logprobs - b_old_logprobs)
                 surr1 = ratio * b_advantages
                 surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * b_advantages
                 
-                actor_loss = -torch.min(surr1, surr2).mean()
-                critic_loss = F.mse_loss(values, b_returns)
-                entropy_loss = entropies.mean()
+                # 5. MASK THE LOSSES: Multiply by pad_mask to ignore padded 0s, then average over valid steps only
+                valid_steps = pad_mask.sum()
                 
-                total_loss = actor_loss + 0.5 * critic_loss - 0.05 * entropy_loss
+                actor_loss = -(torch.min(surr1, surr2) * pad_mask).sum() / valid_steps
+                
+                # Use reduction='none' so we can mask the MSE loss per-element before summing
+                critic_loss = (F.mse_loss(values, b_returns, reduction='none') * pad_mask).sum() / valid_steps
+                
+                entropy_loss = (entropies * pad_mask).sum() / valid_steps
+                
+                total_loss = actor_loss + 0.5 * critic_loss - 0.1 * entropy_loss
                 
                 optimizer.zero_grad()
                 total_loss.backward()

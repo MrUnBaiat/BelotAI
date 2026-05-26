@@ -30,22 +30,20 @@ class RecurrentPPOModel(nn.Module):
             lstm_out, new_hc = self.lstm(features, hc)
             features_out = lstm_out.squeeze(1) # Remove time dim -> (B, 256)
         else:
-            # --- Batch Sequence Training Mode (Blazing Fast CUDA Unrolling) ---
-            batch_size, seq_len, _ = obs.shape
-            # Flatten across batch and time to pass through MLPs quickly
-            flat_features = self.feature_extractor(obs.view(-1, 219))
-            features = flat_features.view(batch_size, seq_len, -1)
-            
+            # --- Batch Sequence Training Mode ---
+            # nn.Linear natively handles 3D tensors! (Batch, Seq_Len, Features)
+            features = self.feature_extractor(obs) 
             features_out, new_hc = self.lstm(features, hc)
-            # Flatten output back to feed into linear heads
-            features_out = features_out.reshape(-1, features_out.shape[-1])
+            # DO NOT reshape/flatten features_out here!
             
+        # logits will naturally be (Batch, Seq_Len, 38) in sequence mode
         logits = self.actor(features_out)
+        
+        # value will naturally be (Batch, Seq_Len, 1) in sequence mode
         value = self.critic(features_out)
         
         if action_mask is not None:
-            if is_sequence:
-                action_mask = action_mask.view(-1, action_mask.shape[-1])
+            # Remove the sequence-flattening logic here too so the 3D shapes match
             bool_mask = action_mask.bool()
             logits = logits.masked_fill(~bool_mask, -1e9)
             

@@ -12,8 +12,8 @@ def evaluate():
     model_500 = RecurrentPPOModel().to(device)
 
     # Ensure the checkpoints exist before attempting to load
-    ckpt_1000_path = "checkpoints/model_epoch_1000.pt"
-    ckpt_500_path = "checkpoints/model_epoch_500.pt"
+    ckpt_1000_path = "checkpoints/model_epoch_3500.pt"
+    ckpt_500_path = "checkpoints/model_epoch_3500.pt"
 
     if not os.path.exists(ckpt_1000_path) or not os.path.exists(ckpt_500_path):
         raise FileNotFoundError("Could not find the specified checkpoints in the 'checkpoints' folder.")

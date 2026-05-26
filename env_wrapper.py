@@ -36,6 +36,9 @@ class BelotAECEnv(AECEnv):
 
     def reset(self, seed=None, options=None):
         self.belot.reset()
+        if self.match_scores[0] >= 101 or self.match_scores[1] >= 101:
+            self.match_scores = [0, 0] 
+            self.belot.bolts_by_team = [0, 0] # Reset bolts for the new match too!
         self.agents = self.possible_agents[:]
         self.rewards = {agent: 0 for agent in self.agents}
         self._cumulative_rewards = {agent: 0 for agent in self.agents}
@@ -116,8 +119,8 @@ class BelotAECEnv(AECEnv):
         idx += 2
         
         # 10. Bolt Counters: 2 dims
-        obs[idx] = self.belot.bolts_by_team[team_us]
-        obs[idx + 1] = self.belot.bolts_by_team[team_them]
+        obs[idx] = self.belot.bolts_by_team[team_us] / 2.0
+        obs[idx + 1] = self.belot.bolts_by_team[team_them] /2.0
         idx += 2
         
         # 11. Relative Dealer: 4-dim one-hot
@@ -160,7 +163,8 @@ class BelotAECEnv(AECEnv):
             # If all are done, do nothing. Otherwise step to next.
             pass
             
-        if not done:
-            self.agent_selection = f"player_{self.belot.current_player}"
-            
+        if done:
+            self.agent_selection = self._agent_selector.next()
+        else:
+            self.agent_selection = f"player_{self.belot.current_player}" # Is this necessary?   
         self._accumulate_rewards()

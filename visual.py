@@ -47,8 +47,8 @@ def visualize_match():
     print("Team 0 (Players 0 & 2): Epoch 1000 Model")
     print("Team 1 (Players 1 & 3): Epoch 500 Model\n")
     
-    model_1000 = load_model("checkpoints/model_epoch_1000.pt")
-    model_500 = load_model("checkpoints/model_epoch_500.pt")
+    model_1000 = load_model("checkpoints/model_epoch_4200.pt")
+    model_500 = load_model("checkpoints/model_epoch_4200.pt")
     
     # Map agents to their respective brain
     brains = {
@@ -73,7 +73,8 @@ def visualize_match():
         
         # Track state to cleanly print events exactly once
         current_phase = "BIDDING"
-        tricks_printed = -1 
+        tricks_started = 0 
+        tricks_resolved = 0
         
         # Initialize Hidden States for the recurrent network
         hidden_states = {
@@ -106,12 +107,12 @@ def visualize_match():
                 current_phase = "PLAYING"
 
             # Start of a new trick (Print hands)
-            if env.belot.phase == "PLAYING" and env.belot.tricks_played > tricks_printed:
+            if env.belot.phase == "PLAYING" and env.belot.tricks_played == tricks_started:
                 print(f"\n--- TRICK {env.belot.tricks_played + 1} ---")
                 for i in range(4):
                     print(f"Player {i} Hand: {decode_hand(env.belot.hands[i])}")
                 print("")
-                tricks_printed = env.belot.tricks_played
+                tricks_started += 1
 
             # --- AI DECISION LOGIC ---
             obs = torch.tensor(obs_dict["observation"], dtype=torch.float32).unsqueeze(0)
@@ -122,8 +123,6 @@ def visualize_match():
             model = brains[agent]
             with torch.no_grad():
                 dist, _, new_hc = model(obs, hc, mask, is_sequence=False)
-                # We use .sample() for stochastic play, but if you want to see their 
-                # absolute best move, you could use torch.argmax(dist.probs)
                 action = dist.sample().item()
             
             # Print Action
@@ -134,11 +133,11 @@ def visualize_match():
             hidden_states[agent] = new_hc
             
             # Trick Resolution Print
-            if env.belot.phase == "PLAYING" and len(env.belot.current_trick) == 0 and env.belot.tricks_played > tricks_printed:
+            if env.belot.phase == "PLAYING" and env.belot.tricks_played > tricks_resolved:
                 # The environment resolves the trick internally before the next player acts
-                winner = env.belot.trick_history[-1][0][0] # Trick history holds the winning info internally if evaluated
-                # Actually, env.py just advances to the winner. So current_player IS the winner.
+                winner = env.belot.trick_history[-1][0][0] 
                 print(f"*** Player {env.belot.current_player} takes the trick! ***")
+                tricks_resolved += 1
 
         # End of Hand Summary
         print(f"\n{'='*40}")

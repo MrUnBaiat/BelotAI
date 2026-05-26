@@ -13,6 +13,7 @@ class BelotEnv:
         self.reset()
 
     def reset(self):
+        """Called at the end of the episode (after 8 tricks) to start a new hand. Bolts persist across hands until a match reset."""
         # Deck setup: 32 cards. IDs 0-31
         # Suit = id // 8, Rank = id % 8 (0=7, 1=8, 2=9, 3=10, 4=J, 5=Q, 6=K, 7=A)
         self.deck = np.random.permutation(32).tolist()
