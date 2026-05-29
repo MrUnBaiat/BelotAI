@@ -13,8 +13,7 @@ def train():
     cpu_device = torch.device("cpu")
     print(f"Training on device: {device}")
     
-    # --- Setup Telemetry and Persistence ---
-    run_name = "belot_ppo_v1"
+    run_name = "belot_ppo_v2_513dim"
     writer = SummaryWriter(f"runs/{run_name}")
     checkpoint_dir = "checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -51,9 +50,9 @@ def train():
         
         for _ in range(episodes_per_batch):
             env.reset()
-            # Initialize hidden states on CPU
+            # Updated to 512 hidden dimensions
             hidden_states = {
-                agent: (torch.zeros(1, 1, 256), torch.zeros(1, 1, 256)) 
+                agent: (torch.zeros(1, 1, 512), torch.zeros(1, 1, 512)) 
                 for agent in env.possible_agents
             }
             
@@ -103,11 +102,7 @@ def train():
             agent_returns[agent] = ret
             agent_advantages[agent] = adv
 
-        # PPO BPTT Loop...
-        epoch_actor_loss = 0
-        epoch_critic_loss = 0
-        epoch_entropy = 0
-        update_steps = 0
+        epoch_actor_loss, epoch_critic_loss, epoch_entropy, update_steps = 0, 0, 0, 0
 
         for _ in range(ppo_iters):
             for agent in env.possible_agents:
@@ -130,14 +125,15 @@ def train():
                 
                 # 2. Initialize FRESH hidden states for this specific batch of episodes
                 batch_size = b_obs.size(0)
-                h_0 = torch.zeros(1, batch_size, 256, device=device)
-                c_0 = torch.zeros(1, batch_size, 256, device=device)
+                # Updated sequence initial states for 512 dimensions
+                h_0 = torch.zeros(1, batch_size, 512, device=device)
+                c_0 = torch.zeros(1, batch_size, 512, device=device)
                 curr_hc = (h_0, c_0)
                 
                 # 3. Execute batched sequence through GPU
                 dist, values, _ = model(b_obs, curr_hc, b_masks, is_sequence=True)
                 
-                values = values.squeeze(-1) # Ensure shape matches (Batch, SeqLen)
+                values = values.squeeze(-1) 
                 new_logprobs = dist.log_prob(b_actions)
                 entropies = dist.entropy()
                 
@@ -174,8 +170,6 @@ def train():
             writer.add_scalar("Loss/Actor", epoch_actor_loss / update_steps, epoch)
             writer.add_scalar("Loss/Critic", epoch_critic_loss / update_steps, epoch)
             writer.add_scalar("Loss/Entropy", epoch_entropy / update_steps, epoch)
-            
-            # Log Game Specific Metrics (assuming 1 game = 1 episode for now)
             writer.add_scalar("Scores/Team_Us", env.match_scores[0], epoch)
             writer.add_scalar("Scores/Team_Them", env.match_scores[1], epoch)
             writer.add_scalar("Game/Bolts_Us", env.belot.bolts_by_team[0], epoch)
@@ -183,19 +177,13 @@ def train():
 
         # --- 5. MODEL PERSISTENCE ---
         if epoch % 50 == 0:
-            torch.save({
+            ckpt_data = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-            }, os.path.join(checkpoint_dir, f"model_epoch_{epoch}.pt"))
-            
-            # Keep a floating "latest" pointer
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, latest_ckpt)
-            
+            }
+            torch.save(ckpt_data, os.path.join(checkpoint_dir, f"model_epoch_{epoch}.pt"))
+            torch.save(ckpt_data, latest_ckpt)
             print(f"Epoch {epoch} | Saved Checkpoint | Team Us: {env.match_scores[0]} | Team Them: {env.match_scores[1]}")
 
     writer.close()

@@ -17,10 +17,10 @@ class BelotAECEnv(AECEnv):
         # Action space: 38 distinct actions
         self.action_spaces = {agent: spaces.Discrete(38) for agent in self.possible_agents}
         
-        # Observation space: 219 flat vector + action mask
+        # Changed Observation Space to 513
         self.observation_spaces = {
             agent: spaces.Dict({
-                "observation": spaces.Box(low=0, high=1, shape=(219,), dtype=np.float32),
+                "observation": spaces.Box(low=0, high=1, shape=(513,), dtype=np.float32),
                 "action_mask": spaces.Box(low=0, high=1, shape=(38,), dtype=np.int8)
             }) for agent in self.possible_agents
         }
@@ -28,11 +28,8 @@ class BelotAECEnv(AECEnv):
         # Track global scores across episodes (until 101)
         self.match_scores = [0, 0] # Team 0, Team 1
         
-    def observation_space(self, agent):
-        return self.observation_spaces[agent]
-        
-    def action_space(self, agent):
-        return self.action_spaces[agent]
+    def observation_space(self, agent): return self.observation_spaces[agent]
+    def action_space(self, agent): return self.action_spaces[agent]
 
     def reset(self, seed=None, options=None):
         self.belot.reset()
@@ -51,82 +48,110 @@ class BelotAECEnv(AECEnv):
         self.agent_selection = f"player_{self.belot.current_player}"
 
     def observe(self, agent):
-        """Constructs the 219-dim relative state vector for the given agent."""
         abs_id = int(agent[-1])
         team_us = abs_id % 2
         team_them = 1 - team_us
         
-        obs = np.zeros(219, dtype=np.float32)
+        obs = np.zeros(513, dtype=np.float32)
         idx = 0
         
-        # 1. Private Hand: 32-dim multi-hot
-        hand = self.belot.hands[abs_id]
-        for card in hand:
-            obs[idx + card] = 1.0
+        # 1. Private Hand (32)
+        for card in self.belot.hands[abs_id]: obs[idx + card] = 1.0
         idx += 32
         
-        # 2. Face-Up Card: 32-dim one-hot
+        # 2. Face-Up Card (32)
         if self.belot.face_up_card is not None and self.belot.phase == "BIDDING":
             obs[idx + self.belot.face_up_card] = 1.0
         idx += 32
         
-        # 3. Current Trump: 5-dim one-hot (None, C, D, H, S)
-        if self.belot.trump is None:
-            obs[idx] = 1.0
-        else:
-            obs[idx + 1 + self.belot.trump] = 1.0
+        # 3. Current Trump (5)
+        if self.belot.trump is None: obs[idx] = 1.0
+        else: obs[idx + 1 + self.belot.trump] = 1.0
         idx += 5
         
-        # 4. Relative Contract Holder: 5-dim one-hot (None, Self, Left, Partner, Right)
-        if self.belot.declarer is None:
-            obs[idx] = 1.0
-        else:
-            rel_declarer = (self.belot.declarer - abs_id) % 4
-            obs[idx + 1 + rel_declarer] = 1.0
+        # 4. Relative Declarer (5)
+        if self.belot.declarer is None: obs[idx] = 1.0
+        else: obs[idx + 1 + (self.belot.declarer - abs_id) % 4] = 1.0
         idx += 5
         
-        # 5. Current Phase: 3-dim one-hot (Bidding 1, Bidding 2, Playing)
+        # 5. Phase (3)
         if self.belot.phase == "BIDDING":
             if self.belot.bidding_round == 1: obs[idx] = 1.0
             else: obs[idx + 1] = 1.0
-        else:
-            obs[idx + 2] = 1.0
+        else: obs[idx + 2] = 1.0
         idx += 3
         
-        # 6. Current Trick Cards: 128-dim (4 relative seats * 32 cards)
-        for player, card in self.belot.current_trick:
-            rel_player = (player - abs_id) % 4
-            obs[idx + (rel_player * 32) + card] = 1.0
-        idx += 128
-        
-        # 7. Trick Leader: 4-dim one-hot relative ID
-        if len(self.belot.current_trick) > 0:
-            leader_abs = self.belot.current_trick[0][0]
-        else:
-            leader_abs = self.belot.current_player
-        rel_leader = (leader_abs - abs_id) % 4
-        obs[idx + rel_leader] = 1.0
-        idx += 4
-        
-        # 8. Match Scores: 2 dims (Us / 101, Them / 101)
+        # 6. Current Trick (108) - Left (1), Partner (2), Right (3)
+        for rel in [1, 2, 3]:
+            abs_p = (abs_id + rel) % 4
+            for seq_idx, (p, c) in enumerate(self.belot.current_trick): # 2 for loops seems too much
+                if p == abs_p:
+                    obs[idx + c] = 1.0
+                    obs[idx + 32 + seq_idx] = 1.0 # 4-dim sequence
+            idx += 36
+            
+        # 7. Game Stats (6)
         obs[idx] = self.match_scores[team_us] / 101.0
         obs[idx + 1] = self.match_scores[team_them] / 101.0
-        idx += 2
+        obs[idx + 2] = self.belot.raw_points_by_team[team_us] / 162.0
+        obs[idx + 3] = self.belot.raw_points_by_team[team_them] / 162.0
+        obs[idx + 4] = self.belot.bolts_by_team[team_us] / 2.0
+        obs[idx + 5] = self.belot.bolts_by_team[team_them] / 2.0
+        idx += 6
         
-        # 9. Bile Points (Raw Points): 2 dims (Us / 162, Them / 162)
-        obs[idx] = self.belot.raw_points_by_team[team_us] / 162.0
-        obs[idx + 1] = self.belot.raw_points_by_team[team_them] / 162.0
-        idx += 2
-        
-        # 10. Bolt Counters: 2 dims
-        obs[idx] = self.belot.bolts_by_team[team_us] / 2.0
-        obs[idx + 1] = self.belot.bolts_by_team[team_them] /2.0
-        idx += 2
-        
-        # 11. Relative Dealer: 4-dim one-hot
-        rel_dealer = (self.belot.dealer - abs_id) % 4
-        obs[idx + rel_dealer] = 1.0
+        # 8. Relative Dealer (4)
+        obs[idx + (self.belot.dealer - abs_id) % 4] = 1.0
         idx += 4
+        
+        # 9. Last Trick (144) - Me (0), Left (1), Partner (2), Right (3)
+        for rel in [0, 1, 2, 3]:
+            abs_p = (abs_id + rel) % 4
+            for seq_idx, (p, c) in enumerate(self.belot.last_trick): # Again, 2 for loops seems too much
+                if p == abs_p:
+                    obs[idx + c] = 1.0
+                    obs[idx + 32 + seq_idx] = 1.0
+            idx += 36
+            
+        # 10. Belief State Matrix Calc (96)
+        unseen = np.ones(32, dtype=bool)
+        unseen[self.belot.hands[abs_id]] = False
+        unseen[self.belot.graveyard] = False
+        for p, c in self.belot.current_trick: unseen[c] = False
+        if self.belot.phase == "BIDDING" and self.belot.face_up_card is not None:
+            unseen[self.belot.face_up_card] = False
+            
+        other_players = [(abs_id + 1) % 4, (abs_id + 2) % 4, (abs_id + 3) % 4]
+        
+        # Vectorized Prob Distribution
+        W = np.zeros((3, 32), dtype=np.float32)
+        for i, p in enumerate(other_players):
+            valid = unseen & ~self.belot.impossible_cards[p] & ~self.belot.known_cards[p]
+            W[i, valid] = 1.0
+            
+        col_sums = W.sum(axis=0)
+        col_sums[col_sums == 0] = 1.0 
+        P = W / col_sums 
+        
+        remaining = np.array([len(self.belot.hands[p]) - self.belot.known_cards[p].sum() for p in other_players], dtype=np.float32)
+        row_sums = P.sum(axis=1)
+        row_sums[row_sums == 0] = 1.0
+        
+        P = P * (remaining[:, np.newaxis] / row_sums[:, np.newaxis])
+        P = np.clip(P, 0.0, 1.0)
+        
+        belief_matrix = np.zeros((3, 32), dtype=np.float32)
+        for i, p in enumerate(other_players):
+            belief_matrix[i, self.belot.known_cards[p]] = 1.0
+            unresolved_mask = ~self.belot.known_cards[p]
+            belief_matrix[i, unresolved_mask] = P[i, unresolved_mask]
+            
+            obs[idx : idx + 32] = belief_matrix[i]
+            idx += 32
+            
+        # 11. Trick Number (8)
+        trick_idx = min(self.belot.tricks_played, 7) # Bounds protection
+        obs[idx + trick_idx] = 1.0
+        idx += 8
         
         # Action Masking Extraction
         # Note: If it's not the agent's turn, PettingZoo expects a 0 mask to prevent learning on dummy turns.
@@ -134,6 +159,17 @@ class BelotAECEnv(AECEnv):
             legal_mask = self.belot.get_legal_actions().astype(np.int8)
         else:
             legal_mask = np.zeros(38, dtype=np.int8)
+            
+        # 12. Valid Actions Feature Injection (38)
+        obs[idx : idx + 38] = legal_mask.astype(np.float32)
+        idx += 38
+        
+        # 13. The Graveyard (32)
+        for c in self.belot.graveyard: obs[idx + c] = 1.0
+        idx += 32
+        
+        # Integrity Assert
+        assert idx == 513, f"Expected exactly 513 features, but built vector with {idx}"
             
         return {"observation": obs, "action_mask": legal_mask}
 
@@ -163,8 +199,6 @@ class BelotAECEnv(AECEnv):
             # If all are done, do nothing. Otherwise step to next.
             pass
             
-        if done:
-            self.agent_selection = self._agent_selector.next()
-        else:
-            self.agent_selection = f"player_{self.belot.current_player}" # Is this necessary?   
+        if done: self.agent_selection = self._agent_selector.next()
+        else: self.agent_selection = f"player_{self.belot.current_player}" 
         self._accumulate_rewards()
