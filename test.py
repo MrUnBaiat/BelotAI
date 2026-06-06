@@ -12,8 +12,8 @@ def evaluate():
     model_500 = RecurrentPPOModel().to(device)
 
     # Ensure the checkpoints exist before attempting to load
-    ckpt_1000_path = "checkpoints/model_epoch_3500.pt"
-    ckpt_500_path = "checkpoints/model_epoch_3500.pt"
+    ckpt_500_path = "checkpoints/model_epoch_9950.pt"
+    ckpt_1000_path = "checkpoints/model_epoch_7350.pt"
 
     if not os.path.exists(ckpt_1000_path) or not os.path.exists(ckpt_500_path):
         raise FileNotFoundError("Could not find the specified checkpoints in the 'checkpoints' folder.")
@@ -28,7 +28,7 @@ def evaluate():
     env = BelotAECEnv()
 
     # --- 2. Setup Match Tracking ---
-    total_matches = 100
+    total_matches = 500
     wins_1000 = 0
     wins_500 = 0
     draws = 0
@@ -51,7 +51,7 @@ def evaluate():
             
             # Re-initialize hidden states for the new hand
             hidden_states = {
-                agent: (torch.zeros(1, 1, 256, device=device), torch.zeros(1, 1, 256, device=device))
+                agent: (torch.zeros(1, 1, 512, device=device), torch.zeros(1, 1, 512, device=device))
                 for agent in env.possible_agents
             }
 

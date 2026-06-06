@@ -47,8 +47,8 @@ def visualize_match():
     print("Team 0 (Players 0 & 2): Epoch 1000 Model")
     print("Team 1 (Players 1 & 3): Epoch 500 Model\n")
     
-    model_1000 = load_model("checkpoints/model_epoch_4200.pt")
-    model_500 = load_model("checkpoints/model_epoch_4200.pt")
+    model_1000 = load_model("checkpoints/model_epoch_9950.pt")
+    model_500 = load_model("checkpoints/model_epoch_9950.pt")
     
     # Map agents to their respective brain
     brains = {
@@ -63,7 +63,7 @@ def visualize_match():
     game_number = 1
     
     # Play until a team breaks 101 points
-    while max(env.match_scores) < 101:
+    while max(env.match_scores) < 22:
         print(f"\n{'='*40}")
         print(f"       STARTING HAND {game_number}")
         print(f"  SCORE -> Team 0: {env.match_scores[0]} | Team 1: {env.match_scores[1]}")
@@ -78,7 +78,7 @@ def visualize_match():
         
         # Initialize Hidden States for the recurrent network
         hidden_states = {
-            agent: (torch.zeros(1, 1, 256), torch.zeros(1, 1, 256)) 
+            agent: (torch.zeros(1, 1, 512), torch.zeros(1, 1, 512)) 
             for agent in env.possible_agents
         }
         

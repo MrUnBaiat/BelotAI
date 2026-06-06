@@ -152,7 +152,7 @@ def train():
                 
                 entropy_loss = (entropies * pad_mask).sum() / valid_steps
                 
-                total_loss = actor_loss + 0.5 * critic_loss - 0.1 * entropy_loss
+                total_loss = actor_loss + 0.5 * critic_loss - 0.15 * entropy_loss
                 
                 optimizer.zero_grad()
                 total_loss.backward()
