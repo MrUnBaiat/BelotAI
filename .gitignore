@@ -4,3 +4,6 @@ runs/
 temp
 backUp/
 toDo.md
+.coverage
+.pytest_cache/
+htmlcov/
