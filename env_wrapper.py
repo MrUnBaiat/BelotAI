@@ -21,6 +21,7 @@ class BelotAECEnv(AECEnv):
         self.observation_spaces = {
             agent: spaces.Dict({
                 "observation": spaces.Box(low=0, high=1, shape=(513,), dtype=np.float32),
+                "global_observation": spaces.Box(low=0, high=1, shape=(332,), dtype=np.float32),
                 "action_mask": spaces.Box(low=0, high=1, shape=(38,), dtype=np.int8)
             }) for agent in self.possible_agents
         }
@@ -170,8 +171,85 @@ class BelotAECEnv(AECEnv):
         
         # Integrity Assert
         assert idx == 513, f"Expected exactly 513 features, but built vector with {idx}"
+        
+        # ==========================================
+        # BUILD EGOCENTRIC GLOBAL STATE (332 Dims)
+        # ==========================================
+        g_obs = np.zeros(332, dtype=np.float32)
+        g_idx = 0
+        
+        # 1. Relative Hands (128): Me, Left, Partner, Right
+        for rel in [0, 1, 2, 3]:
+            abs_p = (abs_id + rel) % 4
+            for card in self.belot.hands[abs_p]: 
+                g_obs[g_idx + card] = 1.0
+            g_idx += 32
             
-        return {"observation": obs, "action_mask": legal_mask}
+        # 2. Graveyard (32)
+        for c in self.belot.graveyard: 
+            g_obs[g_idx + c] = 1.0
+        g_idx += 32
+        
+        # 3. Face-Up Card (32)
+        if self.belot.phase == "BIDDING" and self.belot.face_up_card is not None:
+            g_obs[g_idx + self.belot.face_up_card] = 1.0
+        g_idx += 32
+        
+        # 4. Current Trump (5)
+        if self.belot.trump is None: g_obs[g_idx] = 1.0
+        else: g_obs[g_idx + 1 + self.belot.trump] = 1.0
+        g_idx += 5
+        
+        # 5. Relative Declarer (5)
+        if self.belot.declarer is None: g_obs[g_idx] = 1.0
+        else: g_obs[g_idx + 1 + (self.belot.declarer - abs_id) % 4] = 1.0
+        g_idx += 5
+        
+        # 6. Relative Dealer (4)
+        g_obs[g_idx + (self.belot.dealer - abs_id) % 4] = 1.0
+        g_idx += 4
+        
+        # 7. Phase (3)
+        if self.belot.phase == "BIDDING":
+            if self.belot.bidding_round == 1: g_obs[g_idx] = 1.0
+            else: g_obs[g_idx + 1] = 1.0
+        else: g_obs[g_idx + 2] = 1.0
+        g_idx += 3
+        
+        # 8. Relative Current Trick (108): Left, Partner, Right (Me has no card yet)
+        for rel in [1, 2, 3]:
+            abs_p = (abs_id + rel) % 4
+            for seq_idx, (p, c) in enumerate(self.belot.current_trick): # 2 for loops seems too much
+                if p == abs_p:
+                    g_obs[g_idx + c] = 1.0
+                    g_obs[g_idx + 32 + seq_idx] = 1.0
+            g_idx += 36
+            
+        # 9. Relative Game Stats (6)
+        g_obs[g_idx] = self.match_scores[team_us] / 101.0
+        g_obs[g_idx + 1] = self.match_scores[team_them] / 101.0
+        g_obs[g_idx + 2] = self.belot.raw_points_by_team[team_us] / 162.0
+        g_obs[g_idx + 3] = self.belot.raw_points_by_team[team_them] / 162.0
+        g_obs[g_idx + 4] = self.belot.bolts_by_team[team_us] / 2.0
+        g_obs[g_idx + 5] = self.belot.bolts_by_team[team_them] / 2.0
+        g_idx += 6
+        
+        # 10. Trick Number (8)
+        trick_idx = min(self.belot.tricks_played, 7)
+        g_obs[g_idx + trick_idx] = 1.0
+        g_idx += 8
+        
+        # 11. Declarer Has Played Trump (1)
+        g_obs[g_idx] = float(self.belot.declarer_has_played_trump)
+        g_idx += 1
+        
+        assert g_idx == 332, f"Expected exactly 332 features for global state, but built vector with {g_idx}"
+        
+        return {
+            "observation": obs, # Assuming 'obs' is your 513-dim local vector built above
+            "global_observation": g_obs,
+            "action_mask": legal_mask # Assuming 'legal_mask' built above
+        }
 
     def step(self, action):
         if self.terminations[self.agent_selection] or self.truncations[self.agent_selection]:

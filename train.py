@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from env_wrapper import BelotAECEnv
-from model import RecurrentPPOModel
+from model import RecurrentMAPPOModel
 from memory import MultiAgentMemory
 
 def train():
@@ -19,7 +19,7 @@ def train():
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     env = BelotAECEnv()
-    model = RecurrentPPOModel().to(device)
+    model = RecurrentMAPPOModel().to(device)
     optimizer = optim.Adam(model.parameters(), lr=3e-4)
     memory = MultiAgentMemory(env.possible_agents)
     
@@ -69,16 +69,18 @@ def train():
                 
                 # Keep everything on CPU! No .to(device) here.
                 obs = torch.tensor(obs_dict["observation"], dtype=torch.float32).unsqueeze(0)
+                g_obs = torch.tensor(obs_dict["global_observation"], dtype=torch.float32).unsqueeze(0) # Extract Global
                 mask = torch.tensor(obs_dict["action_mask"], dtype=torch.float32).unsqueeze(0)
                 hc = hidden_states[agent]
                 
                 with torch.no_grad():
-                    dist, value, new_hc = model(obs, hc, mask, is_sequence=False)
+                    # Pass BOTH local and global obs to the model
+                    dist, value, new_hc = model(obs, g_obs, hc, mask, is_sequence=False)
                     action = dist.sample()
                     logprob = dist.log_prob(action)
                 
                 memory.buffers[agent].store(
-                    obs.squeeze(), mask.squeeze(), action.item(), 
+                    obs.squeeze(), g_obs.squeeze(), mask.squeeze(), action.item(), 
                     logprob.item(), 0.0, value.item(), False, 
                     hc[0].squeeze(), hc[1].squeeze()
                 )
@@ -110,12 +112,13 @@ def train():
                 if len(buf.obs) == 0: continue
                 
                 # 1. Get properly batched and padded sequences
-                b_obs, b_masks, b_actions, b_old_logprobs, b_returns, b_advantages, pad_mask = buf.get_padded_batch(
+                b_obs, b_gobs, b_masks, b_actions, b_old_logprobs, b_returns, b_advantages, pad_mask = buf.get_padded_batch(
                     agent_advantages[agent], agent_returns[agent]
                 )
                 
                 # Move everything to GPU
                 b_obs = b_obs.to(device)
+                b_gobs = b_gobs.to(device) # Move Global
                 b_masks = b_masks.to(device)
                 b_actions = b_actions.to(device)
                 b_old_logprobs = b_old_logprobs.to(device)
@@ -131,7 +134,7 @@ def train():
                 curr_hc = (h_0, c_0)
                 
                 # 3. Execute batched sequence through GPU
-                dist, values, _ = model(b_obs, curr_hc, b_masks, is_sequence=True)
+                dist, values, _ = model(b_obs, b_gobs, curr_hc, b_masks, is_sequence=True)
                 
                 values = values.squeeze(-1) 
                 new_logprobs = dist.log_prob(b_actions)
