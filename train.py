@@ -50,7 +50,6 @@ def train():
         
         for _ in range(episodes_per_batch):
             env.reset()
-            # Updated to 512 hidden dimensions
             hidden_states = {
                 agent: (torch.zeros(1, 1, 512), torch.zeros(1, 1, 512)) 
                 for agent in env.possible_agents
@@ -58,27 +57,32 @@ def train():
             
             for agent in env.agent_iter():
                 obs_dict, reward, termination, truncation, info = env.last()
-                scaled_reward = reward / 10.0 
+                
+                # REWARD RETROACTION: I did not understand this, but I think it is needed
+                # At time `t`, env.last() provides the accumulated reward derived from the action 
+                # taken at `t-1`. We assign this back to the transition generated in the previous step.
+                if len(memory.buffers[agent].rewards) > 0:
+                    memory.buffers[agent].rewards[-1] = reward # Why not +=?
                 
                 if termination or truncation:
                     if len(memory.buffers[agent].rewards) > 0:
-                        memory.buffers[agent].rewards[-1] = scaled_reward # should we use +=?
                         memory.buffers[agent].dones[-1] = True
                     env.step(None) 
                     continue
                 
                 # Keep everything on CPU! No .to(device) here.
                 obs = torch.tensor(obs_dict["observation"], dtype=torch.float32).unsqueeze(0)
-                g_obs = torch.tensor(obs_dict["global_observation"], dtype=torch.float32).unsqueeze(0) # Extract Global
+                g_obs = torch.tensor(obs_dict["global_observation"], dtype=torch.float32).unsqueeze(0) 
                 mask = torch.tensor(obs_dict["action_mask"], dtype=torch.float32).unsqueeze(0)
                 hc = hidden_states[agent]
                 
                 with torch.no_grad():
-                    # Pass BOTH local and global obs to the model
                     dist, value, new_hc = model(obs, g_obs, hc, mask, is_sequence=False)
                     action = dist.sample()
                     logprob = dist.log_prob(action)
                 
+                # Store transition at `t`. Reward is stored as 0.0 but gets overwritten
+                # on the agent's next turn with the actual result of this action.
                 memory.buffers[agent].store(
                     obs.squeeze(), g_obs.squeeze(), mask.squeeze(), action.item(), 
                     logprob.item(), 0.0, value.item(), False, 

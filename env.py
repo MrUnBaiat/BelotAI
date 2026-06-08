@@ -12,6 +12,9 @@ class BelotEnv:
         self.bolts_by_team = [0, 0] # Persists across hands (reset() does not wipe this)
         self.graveyard = []
         self.last_trick = []
+        
+        # New: Track ongoing dense rewards to calculate the final true-up
+        self.accumulated_dense_rewards = [0.0, 0.0, 0.0, 0.0]
         self.reset()
 
     def reset(self):
@@ -54,6 +57,8 @@ class BelotEnv:
         self.impossible_cards = np.zeros((4, 32), dtype=bool)
         self.known_cards = np.zeros((4, 32), dtype=bool)
         
+        # Reset episode accumulated rewards
+        self.accumulated_dense_rewards = [0.0, 0.0, 0.0, 0.0]
         self.done = False
 
         # Forced Jack Exception
@@ -93,7 +98,6 @@ class BelotEnv:
     def get_legal_actions(self):
         """Returns a boolean array of length 38 indicating legal actions for the current player."""
         legal = np.zeros(self.action_space_size, dtype=bool)
-        
         if self.done: return legal
             
         if self.phase == "BIDDING":
@@ -173,18 +177,48 @@ class BelotEnv:
         if not self.get_legal_actions()[action]:
             raise ValueError(f"Illegal action {action} chosen by Player {self.current_player}")
 
+        step_rewards = [0.0, 0.0, 0.0, 0.0]
+
         if self.phase == "BIDDING":
             self._handle_bidding_action(action)
         elif self.phase == "PLAYING":
-            self._handle_playing_action(action)
+            trick_resolved, points, winner = self._handle_playing_action(action)
+            
+            if trick_resolved:
+                # 1. Provide Dense Zero-Sum Reward (Normalized to Raw Points Max: 162.0)
+                winning_team = winner % 2
+                losing_team = 1 - winning_team
+                
+                dense_w = points / 162.0
+                dense_l = -points / 162.0
+                
+                step_rewards[winning_team] = dense_w
+                step_rewards[winning_team + 2] = dense_w
+                step_rewards[losing_team] = dense_l
+                step_rewards[losing_team + 2] = dense_l
+                
+                for i in range(4):
+                    self.accumulated_dense_rewards[i] += step_rewards[i]
 
-        reward = [0, 0, 0, 0]
+        info = {}
         if self.done:
-            reward = self._calculate_final_rewards()
-            # Dealer rotation happens here, while persistent bolts remain intact
+            # 2. Final True-Up Process
+            game_points = self._calculate_final_rewards()
+            info["game_points"] = game_points # Export for global tensorboard tracking
+            
+            # Zero-sum Match Points target (Normalized to Max Match Points: 16.0)
+            target_0 = (game_points[0] - game_points[1]) / 16.0
+            target_1 = (game_points[1] - game_points[0]) / 16.0
+            targets = [target_0, target_1, target_0, target_1]
+            
+            # Correct the final trick's reward so episode sum exactly equals the zero-sum strategic Target
+            for i in range(4):
+                true_up = targets[i] - self.accumulated_dense_rewards[i]
+                step_rewards[i] += true_up
+                
             self.dealer = (self.dealer + 1) % self.num_players
 
-        return self._get_observation(), reward, self.done, {}
+        return self._get_observation(), step_rewards, self.done, info
 
     def _handle_bidding_action(self, action):
         if action == 32: # Pass
@@ -235,6 +269,7 @@ class BelotEnv:
         
         if len(self.current_trick) < 4:
             self.current_player = (self.current_player + 1) % self.num_players
+            return False, 0, None # Not resolved yet
         else:
             # Evaluate trick
             winner, points = self._evaluate_trick()
@@ -245,17 +280,19 @@ class BelotEnv:
             self.graveyard.extend([c for _, c in self.current_trick])
             
             self.tricks_won_by_team[winning_team] += 1
-            self.raw_points_by_team[winning_team] += points
             self.trick_history.append(self.current_trick)
             self.tricks_played += 1
             
+            if self.tricks_played == 8: # Why are we doing Pasledu handling here?
+                # Add Pasledu directly into trick raw points for correct dense reward scaling
+                points += 10
+                self.done = True
+
+            self.raw_points_by_team[winning_team] += points
             self.current_player = winner
             self.current_trick = []
 
-            if self.tricks_played == 8:
-                # Pasledu: ALWAYS 10 points to the team that wins the last trick
-                self.raw_points_by_team[winning_team] += 10
-                self.done = True
+            return True, points, winner
 
     def _evaluate_trick(self):
         led_suit = self.current_trick[0][1] // 8

@@ -259,19 +259,26 @@ class BelotAECEnv(AECEnv):
         agent = self.agent_selection
         self._clear_rewards()
         
+        self._cumulative_rewards[agent] = 0
+        
         # Step the underlying environment
-        _, step_rewards, done, _ = self.belot.step(action)
+        _, step_rewards, done, info = self.belot.step(action)
+        
+        # Broadcast the newly resolved step rewards to all agents' tracking dictionaries
+        for i in range(4):
+            agent_name = f"player_{i}"
+            self.rewards[agent_name] = step_rewards[i]
         
         if done:
-            # Map final game points to rewards and update match score
             for i in range(4):
                 agent_name = f"player_{i}"
-                self.rewards[agent_name] = step_rewards[i]
                 self.terminations[agent_name] = True
+                self.infos[agent_name] = info
             
-            # Update global match scores (assuming Team 0 is P0/P2, Team 1 is P1/P3)
-            self.match_scores[0] += step_rewards[0] 
-            self.match_scores[1] += step_rewards[1]
+            # Update global match scores strictly using the unnormalized true match points from Info
+            game_points = info.get("game_points", [0, 0, 0, 0])
+            self.match_scores[0] += game_points[0] 
+            self.match_scores[1] += game_points[1]
         
         if self._agent_selector.is_last():
             # If all are done, do nothing. Otherwise step to next.
