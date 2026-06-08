@@ -1,0 +1,9 @@
+__pycache__
+checkpoints/
+runs/
+temp
+backUp/
+toDo.md
+.coverage
+.pytest_cache/
+htmlcov/
