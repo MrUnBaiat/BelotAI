@@ -115,8 +115,8 @@ def train():
                 buf = memory.buffers[agent]
                 if len(buf.obs) == 0: continue
                 
-                # 1. Get properly batched and padded sequences
-                b_obs, b_gobs, b_masks, b_actions, b_old_logprobs, b_returns, b_advantages, pad_mask = buf.get_padded_batch(
+                # Get properly batched and padded sequences
+                b_obs, b_gobs, b_masks, b_actions, b_old_logprobs, b_advantages, b_returns, pad_mask = buf.get_padded_batch(
                     agent_advantages[agent], agent_returns[agent]
                 )
                 
@@ -159,7 +159,7 @@ def train():
                 
                 entropy_loss = (entropies * pad_mask).sum() / valid_steps
                 
-                total_loss = actor_loss + 0.5 * critic_loss - 0.15 * entropy_loss
+                total_loss = actor_loss + 0.5 * critic_loss - 0.05 * entropy_loss
                 
                 optimizer.zero_grad()
                 total_loss.backward()
