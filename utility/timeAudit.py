@@ -101,3 +101,22 @@ def run_bottleneck_audit(num_episodes=128):
 
 if __name__ == "__main__":
     run_bottleneck_audit()
+    
+''' Result:
+Starting bottleneck audit over 128 episodes on CPU...
+
+==================================================
+                BOTTLENECK AUDIT RESULTS            
+==================================================
+Total Rollout Time:   9.6258 seconds
+Total Actions Taken:  4310 steps
+Avg Time Per Step:    2.2334 ms
+--------------------------------------------------
+Observation (observe) |   0.8509s |   8.8% |  0.1974 ms/step
+Inference (model)    |   8.3219s |  86.5% |  1.9308 ms/step
+Env Engine (step)    |   0.1714s |   1.8% |  0.0398 ms/step
+Overhead / Resets    |   0.2635s |   2.7% |  0.0611 ms/step
+==================================================
+
+[AUDIT PASS] Inference dominates. Vectorizing the forward pass WILL yield substantial gains.
+'''

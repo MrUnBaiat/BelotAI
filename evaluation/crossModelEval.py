@@ -1,103 +1,120 @@
 import os
 import torch
-from env_wrapper import BelotAECEnv
+import numpy as np
+from vec_env import VectorizedBelot
 from model import RecurrentMAPPOModel
-from evaluation.modelCombinedCriticActor.model_ppo import RecurrentPPOModel  # The new file from Step 1
+from evaluation.modelCombinedCriticActor.model_ppo import RecurrentPPOModel
 
-def evaluate():
+def evaluate_vectorized(total_matches=500, num_envs=32):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Testing on device: {device}")
+    print(f"Testing on device: {device} using Vectorized Environment ({num_envs} parallel envs)")
 
     # --- 1. Load the Models ---
-    # Team 0: MAPPO (CTDE + Dense Rewards)
     model_mappo = RecurrentMAPPOModel().to(device)
-    # Team 1: PPO (Standard + End-of-Episode Rewards)
     model_ppo = RecurrentPPOModel().to(device)
 
-    # Note: Replace these paths with your actual checkpoint paths
-    ckpt_mappo_path = "model_epoch_2600.pt" 
-    ckpt_ppo_path = "model_epoch_9950.pt"
+    # Update paths to your local weights
+    ckpt_mappo_path = "model_epoch_1100.pt"
+    ckpt_ppo_path = "model_epoch_9450.pt"
 
     if not os.path.exists(ckpt_mappo_path) or not os.path.exists(ckpt_ppo_path):
-        raise FileNotFoundError("Could not find one or both checkpoints. Please check the paths.")
+        raise FileNotFoundError("Could not find one or both checkpoints. Please verify paths.")
 
     model_mappo.load_state_dict(torch.load(ckpt_mappo_path, map_location=device)['model_state_dict'])
     model_ppo.load_state_dict(torch.load(ckpt_ppo_path, map_location=device)['model_state_dict'])
 
-    # Set to evaluation mode
     model_mappo.eval()
     model_ppo.eval()
 
-    env = BelotAECEnv()
+    # --- 2. Setup Vectorized Environment & Tracking ---
+    vec_env = VectorizedBelot(num_envs=num_envs)
 
-    # --- 2. Setup Match Tracking ---
-    total_matches = 500
+    # Tensor tracking for LSTMs: (num_envs, num_players, hidden_dim)
+    hx = torch.zeros(num_envs, 4, 512, device=device)
+    cx = torch.zeros(num_envs, 4, 512, device=device)
+
     wins_mappo = 0
     wins_ppo = 0
     draws = 0
+    matches_played = 0
 
-    print(f"Starting {total_matches} full matches (First to 101 Points)...")
-    print("Team 0 (Players 0 & 2): MAPPO Architecture")
-    print("Team 1 (Players 1 & 3): Standard PPO Architecture\n")
+    print(f"Starting {total_matches} parallel match evaluations...")
+    print("Team 0 (Players 0 & 2): MAPPO (Vectorized Model)")
+    print("Team 1 (Players 1 & 3): Standard PPO Model\n")
 
-    # --- 3. The Evaluation Loop ---
-    for match in range(1, total_matches + 1):
-        # Force a hard reset for the global game variables at the start of a match
-        env.reset()
-        env.match_scores = [0, 0] 
-        env.belot.bolts_by_team = [0, 0] 
+    # --- 3. Evaluation Loop ---
+    while matches_played < total_matches:
+        agents, local, glob, masks = vec_env.observe_active()
 
-        # Keep playing hands until a team hits 101 Game Points
-        while max(env.match_scores) < 101:
-            env.reset() 
+        # Route environments dynamically based on the active player's team
+        team0_envs = [e for e, a in enumerate(agents) if a % 2 == 0]
+        team1_envs = [e for e, a in enumerate(agents) if a % 2 != 0]
+
+        actions = np.zeros(num_envs, dtype=np.int32)
+
+        # Team 0: MAPPO Forward Pass (Batched)
+        if len(team0_envs) > 0:
+            obs_t0 = torch.tensor(local[team0_envs], dtype=torch.float32, device=device)
+            glob_t0 = torch.tensor(glob[team0_envs], dtype=torch.float32, device=device)
+            mask_t0 = torch.tensor(masks[team0_envs], dtype=torch.float32, device=device)
             
-            # Re-initialize hidden states for the new hand. 
-            # Both models use 512 hidden dimensions, so this structure works for both.
-            hidden_states = {
-                agent: (torch.zeros(1, 1, 512, device=device), torch.zeros(1, 1, 512, device=device))
-                for agent in env.possible_agents
-            }
+            p_ids_t0 = [agents[e] for e in team0_envs]
+            h_t0 = hx[team0_envs, p_ids_t0].unsqueeze(0)  # (1, K, 512)
+            c_t0 = cx[team0_envs, p_ids_t0].unsqueeze(0)  # (1, K, 512)
 
-            for agent in env.agent_iter():
-                obs_dict, reward, termination, truncation, info = env.last()
+            with torch.no_grad():
+                dist, _, (new_h, new_c) = model_mappo(obs_t0, glob_t0, (h_t0, c_t0), mask_t0, is_sequence=False)
+                act_t0 = torch.argmax(dist.logits, dim=-1).cpu().numpy()
 
-                if termination or truncation:
-                    env.step(None) # Dead step required by PettingZoo API
-                    continue
+            actions[team0_envs] = act_t0
+            hx[team0_envs, p_ids_t0] = new_h.squeeze(0)
+            cx[team0_envs, p_ids_t0] = new_c.squeeze(0)
 
-                # Prepare common inputs
-                obs = torch.tensor(obs_dict["observation"], dtype=torch.float32, device=device).unsqueeze(0)
-                mask = torch.tensor(obs_dict["action_mask"], dtype=torch.float32, device=device).unsqueeze(0)
-                hc = hidden_states[agent]
+        # Team 1: PPO Forward Pass (Batched)
+        if len(team1_envs) > 0:
+            obs_t1 = torch.tensor(local[team1_envs], dtype=torch.float32, device=device)
+            mask_t1 = torch.tensor(masks[team1_envs], dtype=torch.float32, device=device)
+            
+            p_ids_t1 = [agents[e] for e in team1_envs]
+            h_t1 = hx[team1_envs, p_ids_t1].unsqueeze(0)  # (1, K, 512)
+            c_t1 = cx[team1_envs, p_ids_t1].unsqueeze(0)  # (1, K, 512)
 
-                player_idx = int(agent.split('_')[1])
-                
-                with torch.no_grad():
-                    # --- ARCHITECTURE ROUTING ---
-                    if player_idx % 2 == 0:
-                        # Team 1: PPO only requires the Local Observation
-                        dist, _, new_hc = model_ppo(obs, hc, mask, is_sequence=False)
+            with torch.no_grad():
+                dist, _, (new_h, new_c) = model_ppo(obs_t1, (h_t1, c_t1), mask_t1, is_sequence=False)
+                act_t1 = torch.argmax(dist.logits, dim=-1).cpu().numpy()
+
+            actions[team1_envs] = act_t1
+            hx[team1_envs, p_ids_t1] = new_h.squeeze(0)
+            cx[team1_envs, p_ids_t1] = new_c.squeeze(0)
+
+        # Step individual environments sequentially inside the vector
+        for e in range(num_envs):
+            step_rewards, done, info = vec_env.step_env(e, actions[e])
+            if done:
+                gp = info.get("game_points", [0, 0, 0, 0])
+                final_score_0 = vec_env.match_scores[e][0] + gp[0]
+                final_score_1 = vec_env.match_scores[e][1] + gp[1]
+
+                # Check if the cumulative match score crosses the 101 barrier
+                if final_score_0 >= 101 or final_score_1 >= 101:
+                    if final_score_0 > final_score_1:
+                        wins_mappo += 1
+                    elif final_score_1 > final_score_0:
+                        wins_ppo += 1
                     else:
-                        # Team 0: MAPPO requires the Global Observation
-                        g_obs = torch.tensor(obs_dict["global_observation"], dtype=torch.float32, device=device).unsqueeze(0)
-                        dist, _, new_hc = model_mappo(obs, g_obs, hc, mask, is_sequence=False)
+                        draws += 1
+                    
+                    matches_played += 1
+                    if matches_played % 10 == 0 or matches_played == total_matches:
+                        print(f"Match {matches_played}/{total_matches} Complete | MAPPO Wins: {wins_mappo} | PPO Wins: {wins_ppo} | Draws: {draws}")
+                    
+                    if matches_played >= total_matches:
+                        break
 
-                    # GREEDY ACTION: Take the mathematically best choice
-                    action = torch.argmax(dist.logits, dim=-1).item()
-
-                env.step(action)
-                hidden_states[agent] = new_hc
-
-        # Evaluate the victor of the full match
-        if env.match_scores[0] > env.match_scores[1]:
-            wins_mappo += 1
-        elif env.match_scores[1] > env.match_scores[0]:
-            wins_ppo += 1
-        else:
-            draws += 1 
-
-        if match % 10 == 0:
-            print(f"Match {match}/{total_matches} Complete | MAPPO Wins: {wins_mappo} | PPO Wins: {wins_ppo} | Draws: {draws}")
+                # Clean up and reset hand lifecycle + zero out recurrent memory for this env
+                vec_env.finish_and_reset(e, info)
+                hx[e] = 0.0
+                cx[e] = 0.0
 
     # --- 4. Final Report ---
     print("\n" + "="*35)
@@ -109,4 +126,4 @@ def evaluate():
     print("="*35)
 
 if __name__ == "__main__":
-    evaluate()
+    evaluate_vectorized(total_matches=500, num_envs=32)
