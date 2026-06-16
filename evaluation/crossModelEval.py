@@ -5,7 +5,7 @@ from vec_env import VectorizedBelot
 from model import RecurrentMAPPOModel
 from evaluation.modelCombinedCriticActor.model_ppo import RecurrentPPOModel
 
-def evaluate_vectorized(total_matches=500, num_envs=32):
+def evaluate_vectorized(total_matches=500, num_envs=64):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Testing on device: {device} using Vectorized Environment ({num_envs} parallel envs)")
 
@@ -14,8 +14,8 @@ def evaluate_vectorized(total_matches=500, num_envs=32):
     model_ppo = RecurrentPPOModel().to(device)
 
     # Update paths to your local weights
-    ckpt_mappo_path = "model_epoch_1100.pt"
-    ckpt_ppo_path = "model_epoch_9450.pt"
+    ckpt_mappo_path = "latest_model.pt"
+    ckpt_ppo_path = "model_epoch_9950.pt"
 
     if not os.path.exists(ckpt_mappo_path) or not os.path.exists(ckpt_ppo_path):
         raise FileNotFoundError("Could not find one or both checkpoints. Please verify paths.")
@@ -126,4 +126,4 @@ def evaluate_vectorized(total_matches=500, num_envs=32):
     print("="*35)
 
 if __name__ == "__main__":
-    evaluate_vectorized(total_matches=500, num_envs=32)
+    evaluate_vectorized(total_matches=500, num_envs=64)
