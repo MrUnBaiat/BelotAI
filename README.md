@@ -33,4 +33,4 @@ This repository leverages an in-process lockstep vectorization architecture, a C
 
 ### Key Metric
 * **Eval/PointDiffVsRandom:** Measures the true match-point differential per game. The trained policy achieves an average margin of **+5.5 points** out of a 16-point game maximum, demonstrating a decisive statistical dominance over the baseline.
-![alt text](image.png)
+![Tensorboard PointDiffVsRandom image](pointDiff.png)
