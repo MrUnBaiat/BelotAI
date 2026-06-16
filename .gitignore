@@ -7,3 +7,4 @@ toDo.md
 .coverage
 .pytest_cache/
 htmlcov/
+*.pt
