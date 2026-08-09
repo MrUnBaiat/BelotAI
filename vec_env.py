@@ -9,6 +9,12 @@ observation from every env at once.
 
 Each env always has exactly one active agent, and finished envs are auto-reset by
 the caller, so the batch handed to the network is always exactly N rows wide.
+
+`self.fresh[e]` tracks whether env e is sitting at the FIRST decision of a hand.
+Envs persist across `collect_rollout()` calls while episode buffers do not, so the
+trainer plays out (and discards) any hand still in flight at a rollout boundary --
+otherwise those episodes receive a terminal true-up computed against dense rewards
+they never recorded.
 """
 
 import numpy as np
@@ -21,6 +27,7 @@ class VectorizedBelot:
         self.num_envs = num_envs
         self.envs = [BelotEnv() for _ in range(num_envs)]          # each is reset() in its ctor
         self.match_scores = [[0, 0] for _ in range(num_envs)]      # per-env running match score
+        self.fresh = [True] * num_envs                             # at the first decision of a hand
 
     def active_agents(self):
         """Absolute id of the player to move in each env."""
@@ -51,6 +58,7 @@ class VectorizedBelot:
 
     def step_env(self, e, action):
         """Advance env `e` by one action. Returns (step_rewards, done, info)."""
+        self.fresh[e] = False
         _, step_rewards, done, info = self.envs[e].step(action)
         return step_rewards, done, info
 
@@ -66,6 +74,7 @@ class VectorizedBelot:
         self.match_scores[e][1] += gp[1]
 
         self.envs[e].reset()
+        self.fresh[e] = True
 
         if self.match_scores[e][0] >= 101 or self.match_scores[e][1] >= 101:
             self.match_scores[e] = [0, 0]

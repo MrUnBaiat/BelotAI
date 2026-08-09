@@ -265,6 +265,20 @@ class BelotEnv:
                     for c in range(self.trump*8, self.trump*8+8):
                         self.impossible_cards[self.current_player, c] = True
 
+            # FAILED-OVERRUFF INFERENCE:
+            # overruffing is compulsory whenever possible, so a player who puts a
+            # trump UNDER the highest trump already in the trick has proven they
+            # hold no trump above it. This holds both when ruffing a side suit and
+            # when following a led trump.
+            if self.trump is not None and played_suit == self.trump:
+                trick_trumps = [c for _, c in self.current_trick if c // 8 == self.trump]
+                if trick_trumps:
+                    highest = max(self._get_card_value(t, True)[1] for t in trick_trumps)
+                    if self._get_card_value(card, True)[1] < highest:
+                        for c in range(self.trump*8, self.trump*8+8):
+                            if self._get_card_value(c, True)[1] > highest:
+                                self.impossible_cards[self.current_player, c] = True
+
         self.current_trick.append((self.current_player, card))
         
         if len(self.current_trick) < 4:
@@ -389,5 +403,13 @@ class BelotEnv:
         
 '''
 TODO:
-- Implement less than 14 game cancellation
+- Implement less than 14 game cancellation --- I think I wont do this.
+- Fix:
+    A card known to be held by player X still receives ~0.49 probability mass for each of the other 
+    two opponents (column sum 1.97, not 1.0) — because unseen never excludes known cards, so 
+    the other rows keep treating it as a candidate.
+- Maybe while training reveal some of the cards of the other players in the belief 
+    matrix so that it learns; Just like random dropoff.
+- Envs are not reset between collect_rollout() calls
+- We have decided that LSTM is bad. It does not work. 
 '''

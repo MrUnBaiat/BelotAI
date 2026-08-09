@@ -1,22 +1,24 @@
 """
-Evaluation harness.
+Evaluation harness -- full matches to 101, not isolated hands.
 
-Training losses (actor/critic/entropy) tell you the optimizer is doing
-*something*; they do NOT tell you the agent is getting stronger. In self-play
-with a shared policy you can drive losses down while the policy quietly collapses
-or cycles. So we measure strength directly against fixed reference opponents.
+Training losses tell you the optimizer is doing *something*; they do NOT tell you
+the agent is getting stronger. In self-play with a shared policy you can drive
+losses down while the policy quietly collapses or cycles, so strength is measured
+directly against fixed reference opponents.
+
+v2 changes, all motivated by measured defects in the old per-hand metric:
+  * MATCHES TO 101, not single hands. Bolt counters persist within a match (so
+    the 3rd-bolt -10 rule finally exists in eval) and the RUNNING match score is
+    fed into build_observation -- the score-aware features were previously dead
+    at eval time.
+  * DEALER ROTATES across matches. Pinning dealer=0 handed the model team the
+    dealing seat every time, worth ~3 points of win rate under random play.
+  * TIES ARE COUNTED, not silently scored as losses (~6% of hands end 8-8).
+  * The reference opponent can be a frozen model, so progress is tracked against
+    a fixed yardstick rather than against a moving self.
 
 The learned policy controls team 0 (seats 0 & 2); the opponent controls team 1
-(seats 1 & 3). We report:
-  - win_rate      : fraction of hands where team 0 outscores team 1
-  - avg_point_diff: mean (team0_game_points - team1_game_points) per hand
-
-Opponent is a uniform-random legal player by default, or a frozen past model
-(pass `frozen=`) to track improvement against previous self.
-
-Each hand is played in a neutral match context (match_scores=[0,0], fresh bolts).
-That is a mild distribution shift from training, but it keeps the metric a clean,
-comparable scalar across checkpoints.
+(seats 1 & 3). LSTM state resets each hand, matching training semantics.
 """
 
 import numpy as np
@@ -26,6 +28,49 @@ from env import BelotEnv
 from observation import build_observation
 
 HIDDEN = 512
+
+# --- fixed greedy reference player (never changes, so it is comparable forever) ---
+_NT_POWER = {0: 0, 1: 1, 2: 2, 4: 3, 5: 4, 6: 5, 3: 6, 7: 7}
+_T_POWER  = {0: 0, 1: 1, 5: 2, 6: 3, 3: 4, 7: 5, 2: 6, 4: 7}
+_T_PTS    = {0: 0, 1: 0, 2: 14, 3: 10, 4: 20, 5: 3, 6: 4, 7: 11}
+_NT_PTS   = {0: 0, 1: 0, 2: 0, 3: 10, 4: 2, 5: 3, 6: 4, 7: 11}
+
+
+def _pw(c, tr): return (1, _T_POWER[c % 8]) if c // 8 == tr else (0, _NT_POWER[c % 8])
+def _pt(c, tr): return _T_PTS[c % 8] if c // 8 == tr else _NT_PTS[c % 8]
+
+
+def _heuristic_action(belot):
+    """Greedy: bid only on real trump strength; take tricks cheaply, else dump low."""
+    legal = np.flatnonzero(belot.get_legal_actions())
+    hand = belot.hands[belot.current_player]
+    if belot.phase == "BIDDING":
+        def strength(s, extra=None):
+            cards = [c for c in hand if c // 8 == s] + \
+                    ([extra] if extra is not None and extra // 8 == s else [])
+            return len(cards), sum(_T_PTS[c % 8] for c in cards)
+        if 33 in legal:
+            n, p = strength(belot.face_up_suit, extra=belot.face_up_card)
+            return 33 if (n >= 3 and p >= 20) or n >= 4 else 32
+        suits = [a - 34 for a in legal if a >= 34]
+        best = max(suits, key=lambda s: strength(s))
+        n, p = strength(best)
+        return 32 if (32 in legal and not (n >= 3 and p >= 20)) else 34 + best
+    tr, trick, cards = belot.trump, belot.current_trick, list(legal)
+    if not trick:
+        return max(cards, key=lambda c: _pw(c, tr)[1] - (3 if c // 8 == tr and _T_POWER[c % 8] < 6 else 0))
+    cur = max(_pw(c, tr) for _, c in trick)
+    cur_w = max(trick, key=lambda pc: _pw(pc[1], tr))[0]
+    partner = (cur_w % 2) == (belot.current_player % 2)
+    winners = [c for c in cards if _pw(c, tr) > cur]
+    if partner and len(trick) >= 2:
+        return (max(cards, key=lambda c: (_pt(c, tr), -_pw(c, tr)[1])) if len(trick) == 3
+                else min(cards, key=lambda c: (_pt(c, tr), _pw(c, tr)[1])))
+    if winners:
+        return min(winners, key=lambda c: _pw(c, tr)[1]) if len(trick) == 3 \
+            else max(winners, key=lambda c: _pw(c, tr)[1])
+    return min(cards, key=lambda c: (_pt(c, tr), _pw(c, tr)[1]))
+MAX_HANDS_PER_MATCH = 100     # safety valve; a match to 101 averages ~11 hands
 
 
 def _zero_state(device):
@@ -49,40 +94,120 @@ def _random_action(belot):
     return int(np.random.choice(legal))
 
 
+_PIMC_CACHE = {}
+
+
+def _pimc_action(belot, D=16):
+    """Lazily-built PIMC opponent -- a non-saturating yardstick above the heuristic.
+    Measured +3.06 pts/hand vs the greedy heuristic at D=32 (audit v3, EXP-3b)."""
+    if D not in _PIMC_CACHE:
+        from pimc import make_pimc
+        _PIMC_CACHE[D] = make_pimc(D=D, seed=0)
+    return _PIMC_CACHE[D](belot)
+
+
 @torch.no_grad()
-def evaluate(model, num_games=200, device="cpu", frozen=None, greedy=True):
-    """Play `num_games` hands of team0=model vs team1=(frozen or random)."""
+def evaluate_matches(model, num_matches=100, device="cpu", opponent="random",
+                     frozen=None, greedy=True, pimc_D=16):
+    """
+    Play `num_matches` complete matches to 101.
+
+    opponent : "random"    uniform-random legal play (saturates fast; keep only
+                           as a floor check)
+               "heuristic" fixed greedy player -- an absolute yardstick that does
+                           not saturate and never changes across runs
+               "model"     a reference network, passed via `frozen`
+
+    Returns match_win_rate / match_tie_rate, avg_hand_diff (mean per-hand game
+    point difference -- the low-variance strength scalar), hand_win_rate,
+    avg_hands_per_match, avg final scores, and declarer bolt counts per team.
+    """
     model.eval()
-    if frozen is not None:
+    use_frozen = (opponent == "model" and frozen is not None)
+    if use_frozen:
         frozen.eval()
 
-    point_diffs = []
-    wins = 0
+    match_wins = match_ties = 0
+    hand_diffs, hand_wins, hands_per_match, finals = [], 0, [], []
+    n_hands_total = 0
+    bolts = [0, 0]
+    # AUDIT v3 / EXP-7: per-hand win rate as DEFENDER is an accounting identity --
+    # it equals the opponent's declarer bolt rate exactly, so it measures the
+    # opponent's bidding aggression, not this agent's defence. Raw points taken
+    # while defending is the metric that actually moves with defensive skill.
+    def_raw, def_n, dec_raw, dec_n = 0.0, 0, 0.0, 0
 
-    for _ in range(num_games):
+    for m in range(num_matches):
         belot = BelotEnv()
+        belot.dealer = m % 4          # rotate the first dealer across matches
+        belot.reset()
         match_scores = [0, 0]
-        hc = {s: _zero_state(device) for s in range(4)}  # per-seat LSTM state
-        info = {}
+        hands = 0
 
-        while not belot.done:
-            seat = belot.current_player
-            if seat % 2 == 0:                      # team 0 -> learned policy
-                a, hc[seat] = _net_action(model, belot, seat, hc[seat],
-                                          match_scores, device, greedy)
-            elif frozen is not None:               # team 1 -> frozen reference
-                a, hc[seat] = _net_action(frozen, belot, seat, hc[seat],
-                                          match_scores, device, greedy)
-            else:                                  # team 1 -> random legal
-                a = _random_action(belot)
-            _, _, _, info = belot.step(a)
+        while match_scores[0] < 101 and match_scores[1] < 101 and hands < MAX_HANDS_PER_MATCH:
+            hc = {s: _zero_state(device) for s in range(4)}   # per-seat LSTM state
+            info = {}
+            while not belot.done:
+                seat = belot.current_player
+                if seat % 2 == 0:                      # team 0 -> learned policy
+                    a, hc[seat] = _net_action(model, belot, seat, hc[seat],
+                                              match_scores, device, greedy)
+                elif use_frozen:                       # team 1 -> frozen reference
+                    a, hc[seat] = _net_action(frozen, belot, seat, hc[seat],
+                                              match_scores, device, greedy)
+                elif opponent == "heuristic":          # team 1 -> fixed greedy
+                    a = _heuristic_action(belot)
+                elif opponent == "pimc":               # team 1 -> search player
+                    a = _pimc_action(belot, pimc_D)
+                else:                                  # team 1 -> random legal
+                    a = _random_action(belot)
+                _, _, _, info = belot.step(a)
 
-        gp = info.get("game_points", [0, 0, 0, 0])
-        point_diffs.append(gp[0] - gp[1])
-        wins += int(gp[0] > gp[1])
+            gp = info.get("game_points", [0, 0, 0, 0])
+            if belot.declaring_team is not None and \
+                    belot.raw_points_by_team[belot.declaring_team] <= 80:
+                bolts[belot.declaring_team] += 1
+            if belot.declaring_team == 1:          # we defend
+                def_raw += belot.raw_points_by_team[0]; def_n += 1
+            elif belot.declaring_team == 0:        # we declare
+                dec_raw += belot.raw_points_by_team[0]; dec_n += 1
+            match_scores[0] += gp[0]
+            match_scores[1] += gp[1]
+            hand_diffs.append(gp[0] - gp[1])
+            hand_wins += int(gp[0] > gp[1])
+            hands += 1
+            n_hands_total += 1
+            if match_scores[0] < 101 and match_scores[1] < 101:
+                belot.reset()          # bolts persist within a match; step() rotated the dealer
+
+        match_wins += int(match_scores[0] > match_scores[1])
+        match_ties += int(match_scores[0] == match_scores[1])
+        hands_per_match.append(hands)
+        finals.append(match_scores)
 
     model.train()
+    finals = np.array(finals, dtype=np.float64)
+    p = match_wins / num_matches
     return {
-        "win_rate": wins / num_games,
-        "avg_point_diff": float(np.mean(point_diffs)),
+        "match_win_rate": p,
+        "match_tie_rate": match_ties / num_matches,
+        "match_win_ci95": float(1.96 * np.sqrt(max(p * (1 - p), 1e-9) / num_matches)),
+        "avg_hand_diff": float(np.mean(hand_diffs)),
+        "hand_diff_ci95": float(1.96 * np.std(hand_diffs) / np.sqrt(len(hand_diffs))),
+        "hand_win_rate": hand_wins / max(n_hands_total, 1),
+        "avg_hands_per_match": float(np.mean(hands_per_match)),
+        "avg_final_scores": [float(finals[:, 0].mean()), float(finals[:, 1].mean())],
+        "declarer_bolts": bolts,
+        # skill-sensitive phase metrics (see EXP-7)
+        "defence_raw_points": def_raw / max(def_n, 1),
+        "declare_raw_points": dec_raw / max(dec_n, 1),
+        "declare_rate": dec_n / max(n_hands_total, 1),
     }
+
+
+def evaluate(model, num_games=200, device="cpu", frozen=None, greedy=True):
+    """Backwards-compatible shim: `num_games` is now interpreted as matches."""
+    res = evaluate_matches(model, num_matches=max(num_games // 10, 10), device=device,
+                           opponent="model" if frozen is not None else "random",
+                           frozen=frozen, greedy=greedy)
+    return {"win_rate": res["match_win_rate"], "avg_point_diff": res["avg_hand_diff"]}
