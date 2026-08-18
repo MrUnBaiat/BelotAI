@@ -41,10 +41,7 @@ from eval import evaluate_matches
 NUM_ENVS           = 64      # stable batch width N for every forward pass
 TARGET_GAMES       = 512     # completed games per rollout
 PPO_ITERS          = 4       # optimization epochs over the collected data
-# AUDIT v3 / H8: MINIBATCH_EPISODES is now episodes per OPTIMIZER STEP;
-# MICROBATCH_EPISODES is the forward/backward chunk (memory only).
-MINIBATCH_EPISODES  = 512    # episodes per optimizer step (was 128)
-MICROBATCH_EPISODES = 128    # forward/backward chunk; set == MINIBATCH for v2 behaviour
+MINIBATCH_EPISODES = 128     # ~2x the gradient steps/epoch vs v1; KL stayed ~0.003
 CLIP_EPSILON       = 0.2
 GAMMA              = 0.999   # ~9-step episodes: keep the terminal true-up near-undiscounted
 LAM                = 0.95
@@ -67,21 +64,18 @@ ENTROPY_ANNEAL_EPOCHS = 2000
 OPP_SELF           = 0.70    # current policy in every seat (classic self-play)
 OPP_RANDOM         = 0.15    # uniform-random legal opponent
 OPP_FROZEN         = 0.15    # a frozen snapshot from the pool
-# AUDIT v3 / D1: best_model.pt is OVERWRITTEN by this trainer, so seeding the
-# frozen pool and the eval reference from it made the "fixed yardstick" a
-# descendant of the model being measured. The reference is now an immutable file
-# that the trainer never writes.
-EVAL_REFERENCE     = "checkpoints/reference_model.pt"   # NEVER written by train()
-FROZEN_INIT        = EVAL_REFERENCE                     # seed the pool (None to skip)
+FROZEN_INIT        = "checkpoints/best_model.pt"   # seeds the training pool (None to skip)
+# The EVAL reference must be immutable: best_model.pt is overwritten whenever the
+# model improves, so using it as the yardstick silently redefines the yardstick on
+# every restart and makes "vs reference" incomparable across runs. This file is
+# created once from FROZEN_INIT and then never written again.
+EVAL_REFERENCE     = "checkpoints/reference_model.pt"
 FROZEN_POOL_MAX    = 3
 SNAPSHOT_EVERY     = 100     # epochs between adding the live policy to the pool
 
 EVAL_EVERY         = 50      # epochs between evaluations (fewer, bigger evals)
 EVAL_MATCHES       = 250     # full matches to 101, per opponent (~2750 hands)
-# AUDIT v3 / D2: selection used avg_hand_diff vs the reference, i.e. the model was
-# selected for beating a checkpoint that was itself the previously selected model.
-# Selection now uses the vs-heuristic scalar, per AUDIT_HANDOFF section 8.4.
-SELECTION_METRIC   = "hand_diff_vs_heuristic_v3"   # bump when the metric changes
+SELECTION_METRIC   = "hand_diff_vs_reference_v2"   # bump when the metric changes
 CHECKPOINT_DIR     = "checkpoints"   # on Colab, point this at /content/drive/MyDrive/...
 
 
@@ -144,20 +138,12 @@ def flush_in_flight(model, vec, device):
 
 
 def _sample_opponent(frozen_pool):
-    """
-    AUDIT v3 / D3: the old form short-circuited to "self" whenever the pool was
-    empty, which silently disabled the RANDOM opponent too. A fresh run with no
-    reference checkpoint was therefore 100% self-play until the first snapshot at
-    epoch 100. Random no longer depends on the frozen pool.
-    """
     r = random.random()
-    if r < OPP_SELF:
+    if r < OPP_SELF or not frozen_pool:
         return "self", None
     if r < OPP_SELF + OPP_RANDOM:
         return "random", None
-    if frozen_pool:
-        return "frozen", random.randrange(len(frozen_pool))
-    return "self", None
+    return "frozen", random.randrange(len(frozen_pool))
 
 
 # ============================================================================
@@ -319,77 +305,62 @@ def update(model, optimizer, episodes, device, entropy_coef=ENTROPY_START):
         random.shuffle(episodes)
         iter_kl, iter_steps = 0.0, 0
 
-        # AUDIT v3 / H8: one OPTIMIZER STEP now spans MINIBATCH_EPISODES episodes,
-        # accumulated over MICROBATCH_EPISODES-sized forward/backward passes so the
-        # memory footprint is unchanged. Setting MICROBATCH_EPISODES ==
-        # MINIBATCH_EPISODES reproduces the old behaviour exactly.
-        # Measured justification: the gradient noise scale at a competent,
-        # entropy-matched policy is ~10,400 episodes, so a 128-episode step is
-        # ~99% sampling noise (EXP-6c).
         for start in range(0, len(episodes), MINIBATCH_EPISODES):
             mb = episodes[start:start + MINIBATCH_EPISODES]
-            mb_valid = float(sum(len(ep) for ep in mb))
-            if mb_valid == 0:
-                continue
+            b_obs, b_gobs, b_masks, b_actions, b_old_logprobs, b_adv, b_ret, pad_mask = \
+                make_minibatch(mb)
+
+            b_obs = b_obs.to(device);     b_gobs = b_gobs.to(device)
+            b_masks = b_masks.to(device); b_actions = b_actions.to(device)
+            b_old_logprobs = b_old_logprobs.to(device)
+            b_adv = b_adv.to(device);     b_ret = b_ret.to(device)
+            pad_mask = pad_mask.to(device)
+
+            B = b_obs.size(0)
+            h0 = torch.zeros(1, B, HIDDEN, device=device)
+            c0 = torch.zeros(1, B, HIDDEN, device=device)
+
+            dist, values, _ = model(b_obs, b_gobs, (h0, c0), b_masks, is_sequence=True)
+            values = values.squeeze(-1)
+            new_logprobs = dist.log_prob(b_actions)
+            entropies = dist.entropy()
+
+            logratio = new_logprobs - b_old_logprobs
+            ratio = torch.exp(logratio)
+            surr1 = ratio * b_adv
+            surr2 = torch.clamp(ratio, 1.0 - CLIP_EPSILON, 1.0 + CLIP_EPSILON) * b_adv
+
+            valid = pad_mask.sum()
+            actor_loss   = -(torch.min(surr1, surr2) * pad_mask).sum() / valid
+            critic_loss  = (F.mse_loss(values, b_ret, reduction='none') * pad_mask).sum() / valid
+            entropy_loss = (entropies * pad_mask).sum() / valid
+
+            total_loss = actor_loss + VALUE_COEF * critic_loss - entropy_coef * entropy_loss
+
             optimizer.zero_grad()
-            a_s = c_s = e_s = kl_s = cf_s = 0.0
-            eb_s = ep_s = nb_s = npl_s = 0.0
-
-            for ms in range(0, len(mb), MICROBATCH_EPISODES):
-                chunk = mb[ms:ms + MICROBATCH_EPISODES]
-                b_obs, b_gobs, b_masks, b_actions, b_old_logprobs, b_adv, b_ret, pad_mask = \
-                    make_minibatch(chunk)
-
-                b_obs = b_obs.to(device);     b_gobs = b_gobs.to(device)
-                b_masks = b_masks.to(device); b_actions = b_actions.to(device)
-                b_old_logprobs = b_old_logprobs.to(device)
-                b_adv = b_adv.to(device);     b_ret = b_ret.to(device)
-                pad_mask = pad_mask.to(device)
-
-                B = b_obs.size(0)
-                h0 = torch.zeros(1, B, HIDDEN, device=device)
-                c0 = torch.zeros(1, B, HIDDEN, device=device)
-
-                dist, values, _ = model(b_obs, b_gobs, (h0, c0), b_masks, is_sequence=True)
-                values = values.squeeze(-1)
-                new_logprobs = dist.log_prob(b_actions)
-                entropies = dist.entropy()
-
-                logratio = new_logprobs - b_old_logprobs
-                ratio = torch.exp(logratio)
-                surr1 = ratio * b_adv
-                surr2 = torch.clamp(ratio, 1.0 - CLIP_EPSILON, 1.0 + CLIP_EPSILON) * b_adv
-
-                # normalise by the WHOLE minibatch so accumulation is exactly
-                # equivalent to one big backward pass
-                actor_loss   = -(torch.min(surr1, surr2) * pad_mask).sum() / mb_valid
-                critic_loss  = (F.mse_loss(values, b_ret, reduction='none') * pad_mask).sum() / mb_valid
-                entropy_loss = (entropies * pad_mask).sum() / mb_valid
-                (actor_loss + VALUE_COEF * critic_loss
-                 - entropy_coef * entropy_loss).backward()
-
-                with torch.no_grad():
-                    a_s += float(actor_loss); c_s += float(critic_loss)
-                    e_s += float(entropy_loss)
-                    kl_s += float((((ratio - 1) - logratio) * pad_mask).sum() / mb_valid)
-                    cf_s += float(((torch.abs(ratio - 1.0) > CLIP_EPSILON).float()
-                                   * pad_mask).sum() / mb_valid)
-                    bid_mask = (b_masks[..., 32:].sum(-1) > 0).float() * pad_mask
-                    play_mask = pad_mask - bid_mask
-                    eb_s += float((entropies * bid_mask).sum()); nb_s += float(bid_mask.sum())
-                    ep_s += float((entropies * play_mask).sum()); npl_s += float(play_mask.sum())
-
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 
-            if nb_s > 0:
-                ent_bid_acc += eb_s / nb_s; bid_steps += 1
-            if npl_s > 0:
-                ent_play_acc += ep_s / npl_s; play_steps += 1
-            actor_acc += a_s; critic_acc += c_s; entropy_acc += e_s
-            kl_acc += kl_s; clip_acc += cf_s
+            with torch.no_grad():
+                approx_kl = (((ratio - 1) - logratio) * pad_mask).sum() / valid
+                clip_frac = ((torch.abs(ratio - 1.0) > CLIP_EPSILON).float() * pad_mask).sum() / valid
+                # phase split: a bidding step is the only kind with legal actions >= 32
+                bid_mask = (b_masks[..., 32:].sum(-1) > 0).float() * pad_mask
+                play_mask = pad_mask - bid_mask
+                nb, npl = bid_mask.sum(), play_mask.sum()
+                if nb > 0:
+                    ent_bid_acc += float((entropies * bid_mask).sum() / nb); bid_steps += 1
+                if npl > 0:
+                    ent_play_acc += float((entropies * play_mask).sum() / npl); play_steps += 1
+
+            actor_acc   += actor_loss.item()
+            critic_acc  += critic_loss.item()
+            entropy_acc += entropy_loss.item()
+            kl_acc      += approx_kl.item()
+            clip_acc    += clip_frac.item()
             steps += 1
-            iter_kl += kl_s; iter_steps += 1
+            iter_kl += approx_kl.item(); iter_steps += 1
 
         iters_completed += 1
         # Early-stop PPO iters if the policy has moved too far from the rollout data.
@@ -474,13 +445,17 @@ def train():
     if FROZEN_INIT and os.path.exists(FROZEN_INIT):
         frozen_pool.append(load_frozen(FROZEN_INIT, device))
         print(f"Frozen opponent pool seeded from {FROZEN_INIT}")
-    # The eval reference is loaded as its OWN object from an immutable path, so it
-    # cannot be redefined by anything this run writes.
-    eval_reference = (load_frozen(EVAL_REFERENCE, device)
-                      if EVAL_REFERENCE and os.path.exists(EVAL_REFERENCE) else None)
-    if eval_reference is None:
-        print(f"NOTE: {EVAL_REFERENCE} missing -- vs-reference eval disabled. "
-              f"Selection uses vs-heuristic regardless.")
+
+    # Pin the eval reference once, then reuse that exact file forever.
+    eval_reference = None
+    if EVAL_REFERENCE:
+        if not os.path.exists(EVAL_REFERENCE) and FROZEN_INIT and os.path.exists(FROZEN_INIT):
+            import shutil
+            shutil.copyfile(FROZEN_INIT, EVAL_REFERENCE)
+            print(f"Pinned eval reference: copied {FROZEN_INIT} -> {EVAL_REFERENCE}")
+        if os.path.exists(EVAL_REFERENCE):
+            eval_reference = load_frozen(EVAL_REFERENCE, device)
+            print(f"Eval reference loaded from {EVAL_REFERENCE} (immutable)")
 
     for epoch in range(start_epoch, EPOCHS):
         lr = anneal(LR_START, LR_END, epoch, LR_ANNEAL_EPOCHS)
@@ -538,8 +513,7 @@ def train():
                 line += (f" | vs reference: match% {r_ref['match_win_rate']:.3f} "
                          f"handdiff {r_ref['avg_hand_diff']:+.2f} "
                          f"+-{r_ref['hand_diff_ci95']:.2f}")
-                # AUDIT v3 / D2: vs-reference is REPORTED but never SELECTED ON --
-                # the reference sits in the training pool, so it is exploitable.
+                metric = r_ref["avg_hand_diff"]     # progress vs a FIXED strong opponent
             line += (f" | EV {metrics['explained_variance']:.2f} "
                      f"| iters {metrics['iters_completed']}/{PPO_ITERS} "
                      f"| KL {metrics['approx_kl']:.4f}")

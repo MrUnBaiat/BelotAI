@@ -98,8 +98,9 @@ _PIMC_CACHE = {}
 
 
 def _pimc_action(belot, D=16):
-    """Lazily-built PIMC opponent -- a non-saturating yardstick above the heuristic.
-    Measured +3.06 pts/hand vs the greedy heuristic at D=32 (audit v3, EXP-3b)."""
+    """Lazily-built PIMC opponent -- a search player with no learning, used as a
+    yardstick ABOVE the model. Built on demand so importing eval.py stays cheap
+    and so nothing pays for it unless it is actually used."""
     if D not in _PIMC_CACHE:
         from pimc import make_pimc
         _PIMC_CACHE[D] = make_pimc(D=D, seed=0)
@@ -131,11 +132,6 @@ def evaluate_matches(model, num_matches=100, device="cpu", opponent="random",
     hand_diffs, hand_wins, hands_per_match, finals = [], 0, [], []
     n_hands_total = 0
     bolts = [0, 0]
-    # AUDIT v3 / EXP-7: per-hand win rate as DEFENDER is an accounting identity --
-    # it equals the opponent's declarer bolt rate exactly, so it measures the
-    # opponent's bidding aggression, not this agent's defence. Raw points taken
-    # while defending is the metric that actually moves with defensive skill.
-    def_raw, def_n, dec_raw, dec_n = 0.0, 0, 0.0, 0
 
     for m in range(num_matches):
         belot = BelotEnv()
@@ -167,10 +163,6 @@ def evaluate_matches(model, num_matches=100, device="cpu", opponent="random",
             if belot.declaring_team is not None and \
                     belot.raw_points_by_team[belot.declaring_team] <= 80:
                 bolts[belot.declaring_team] += 1
-            if belot.declaring_team == 1:          # we defend
-                def_raw += belot.raw_points_by_team[0]; def_n += 1
-            elif belot.declaring_team == 0:        # we declare
-                dec_raw += belot.raw_points_by_team[0]; dec_n += 1
             match_scores[0] += gp[0]
             match_scores[1] += gp[1]
             hand_diffs.append(gp[0] - gp[1])
@@ -198,10 +190,6 @@ def evaluate_matches(model, num_matches=100, device="cpu", opponent="random",
         "avg_hands_per_match": float(np.mean(hands_per_match)),
         "avg_final_scores": [float(finals[:, 0].mean()), float(finals[:, 1].mean())],
         "declarer_bolts": bolts,
-        # skill-sensitive phase metrics (see EXP-7)
-        "defence_raw_points": def_raw / max(def_n, 1),
-        "declare_raw_points": dec_raw / max(dec_n, 1),
-        "declare_rate": dec_n / max(n_hands_total, 1),
     }
 
 

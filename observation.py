@@ -9,9 +9,6 @@ of observations without spinning up the full PettingZoo AEC machinery per env.
 
 import numpy as np
 
-IPF_MAX_ROUNDS = 24   # cap on iterative proportional fitting passes
-IPF_TOL        = 1e-3 # row-mass tolerance for early termination
-
 
 def build_observation(belot, abs_id, match_scores):
     """
@@ -124,25 +121,13 @@ def build_observation(belot, abs_id, match_scores):
     # sums must not exceed 1 (during PLAYING they converge to exactly 1, during
     # BIDDING the slack is the face-down talon). The original single pass left
     # columns off by up to ~15% and clip() saturated non-certain entries at 1.0.
-    # AUDIT v3: a FIXED 6 rounds does not converge. Measured over 250 random-play
-    # games: ordinary column mass 0.9841 (5th pct 0.8832), row mass off by up to
-    # 0.80 card slots. This is the feature the ablation showed the policy actually
-    # runs on, so the residual error matters.
-    #   A fixed 24 rounds fixes the accuracy (column mass 0.9972, 5th pct 0.9968)
-    #   but MEASURED at 391us vs 156us per build_observation -- 2.5x, and this runs
-    #   once per env per macro-step, so it is NOT free.
-    # Early termination gets the accuracy at close to the original cost: most
-    # states converge in a few passes and only a minority need the full budget.
     P = W.copy()
-    for _ in range(IPF_MAX_ROUNDS):
+    for _ in range(6):
         rs = P.sum(axis=1, keepdims=True)
         rs[rs == 0] = 1.0
         P = P * (remaining[:, np.newaxis] / rs)
         cs = P.sum(axis=0, keepdims=True)
-        over = cs > 1.0
-        if not over.any() and np.abs(P.sum(axis=1) - remaining).max() < IPF_TOL:
-            break
-        P = P * np.where(over, 1.0 / np.maximum(cs, 1e-8), 1.0)
+        P = P * np.where(cs > 1.0, 1.0 / np.maximum(cs, 1e-8), 1.0)
     P = np.clip(P, 0.0, 1.0)
 
     for i, p in enumerate(other_players):
