@@ -21,13 +21,13 @@ import torch
 import torch.nn.functional as F
 import pytest
 
-from env import BelotEnv
-from model import RecurrentMAPPOModel
-from observation import build_observation
-from vec_env import VectorizedBelot
-from memory import Episode, make_minibatch
-from train import collect_rollout, update
-from eval import evaluate
+from belot.env import BelotEnv
+from belot.model import RecurrentMAPPOModel
+from belot.observation import build_observation
+from belot.vec_env import VectorizedBelot
+from belot.memory import Episode, make_minibatch
+from scripts.train import collect_rollout, update
+from belot.evaluation.match_eval import evaluate
 
 CPU = torch.device("cpu")
 
@@ -522,16 +522,28 @@ def test_rollout_true_up_credit_assignment():
     np.testing.assert_almost_equal(seat_totals[3], t1, decimal=4)
 
 
-def test_collect_rollout_integrity():
+def test_collect_rollout_integrity(monkeypatch):
     """End-to-end guard check on the real rollout:
        - discard-in-flight  -> exactly target_games*4 COMPLETE episodes
        - buffer contiguity  -> episodes group cleanly per game (seats 0..3)
-       - terminal true-up   -> each game is zero-sum with partner symmetry."""
+       - terminal true-up   -> each game is zero-sum with partner symmetry.
+
+    Forced to PURE SELF-PLAY, because only then does a game store all four seats
+    and the "exactly target_games*4" form of the discard-in-flight guarantee
+    become checkable. The shipped mix (OPP_SCRIPT = 0.90) stores only the two
+    even seats of a mixed game; that accounting is covered by the test below."""
+    import scripts.train as T
+    monkeypatch.setattr(T, "OPP_SELF", 1.0)
+    monkeypatch.setattr(T, "OPP_RANDOM", 0.0)
+    monkeypatch.setattr(T, "OPP_SCRIPT", 0.0)
+
     torch.manual_seed(0); np.random.seed(0)
     model = RecurrentMAPPOModel()
     vec = VectorizedBelot(4)
     games = 8
-    eps = collect_rollout(model, vec, games, CPU)
+    # collect_rollout returns (episodes, info); the info dict carries the flush
+    # count and the per-opponent game tally.
+    eps, _ = collect_rollout(model, vec, games, CPU)
 
     assert len(eps) == games * 4, "Did not collect exactly target_games*4 episodes."
     for ep in eps:
@@ -547,6 +559,27 @@ def test_collect_rollout_integrity():
         np.testing.assert_almost_equal(s[0], s[2], decimal=4)   # partner symmetry
         np.testing.assert_almost_equal(s[1], s[3], decimal=4)
         np.testing.assert_almost_equal(s[0], -s[1], decimal=4)  # team zero-sum
+
+
+def test_collect_rollout_episode_accounting():
+    """GAMES ARE NOT EPISODES, and conflating them has bitten this project before:
+    a self-play game stores four episodes (every seat learns) while a mixed game
+    stores only the two even seats, so any budget expressed in games is wrong for
+    an optimizer that consumes episodes.
+
+    Under the shipped opponent mix the only safe invariant is the interval, plus
+    the requirement that every stored episode is complete."""
+    torch.manual_seed(0); np.random.seed(0)
+    model = RecurrentMAPPOModel()
+    vec = VectorizedBelot(4)
+    games = 8
+    eps, info = collect_rollout(model, vec, games, CPU)
+
+    assert 2 * games <= len(eps) <= 4 * games, len(eps)
+    assert sum(info["games_by_opponent"].values()) == games
+    for ep in eps:
+        assert len(ep) >= 8, "an in-flight episode leaked into the buffer"
+        assert all(np.isfinite(r) for r in ep.rewards)
 
 
 def test_hidden_state_routing_no_leakage():
@@ -582,7 +615,7 @@ def test_update_returns_finite_diagnostics():
     model = RecurrentMAPPOModel()
     opt = torch.optim.Adam(model.parameters(), lr=3e-4)
     vec = VectorizedBelot(4)
-    eps = collect_rollout(model, vec, 6, CPU)
+    eps, _ = collect_rollout(model, vec, 6, CPU)
     m = update(model, opt, eps, CPU)
 
     for k in ["actor", "critic", "entropy", "approx_kl", "clip_frac", "explained_variance"]:

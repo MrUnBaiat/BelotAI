@@ -1,75 +1,36 @@
 """
-Evaluation harness -- full matches to 101, not isolated hands.
+Match-level evaluation -- full matches to 101, not isolated hands.
 
-Training losses tell you the optimizer is doing *something*; they do NOT tell you
-the agent is getting stronger. In self-play with a shared policy you can drive
-losses down while the policy quietly collapses or cycles, so strength is measured
-directly against fixed reference opponents.
+Training losses tell you the optimizer is doing something; they do not tell you the
+agent is getting stronger. In self-play with a shared policy you can drive losses
+down while the policy quietly collapses or cycles, so strength is measured directly
+against fixed reference opponents.
 
-v2 changes, all motivated by measured defects in the old per-hand metric:
-  * MATCHES TO 101, not single hands. Bolt counters persist within a match (so
-    the 3rd-bolt -10 rule finally exists in eval) and the RUNNING match score is
-    fed into build_observation -- the score-aware features were previously dead
-    at eval time.
-  * DEALER ROTATES across matches. Pinning dealer=0 handed the model team the
-    dealing seat every time, worth ~3 points of win rate under random play.
-  * TIES ARE COUNTED, not silently scored as losses (~6% of hands end 8-8).
-  * The reference opponent can be a frozen model, so progress is tracked against
-    a fixed yardstick rather than against a moving self.
+Three details that were measured defects in an earlier per-hand metric:
 
-The learned policy controls team 0 (seats 0 & 2); the opponent controls team 1
-(seats 1 & 3). LSTM state resets each hand, matching training semantics.
+  * MATCHES TO 101, not single hands. Bolt counters persist within a match, so the
+    third-bolt penalty finally exists at eval time, and the running match score is
+    fed into `build_observation` -- those score-aware features were previously dead.
+  * THE DEALER ROTATES across matches. Pinning dealer=0 handed the model team the
+    dealing seat every time, worth about three points of win rate under random play.
+  * TIES ARE COUNTED rather than silently scored as losses; roughly 6% of hands
+    end 8-8.
+
+The learned policy controls team 0 (seats 0 and 2); the opponent controls team 1
+(seats 1 and 3). LSTM state resets each hand, matching training semantics.
+
+For comparisons finer than about 0.5 pts/hand use `swap_eval` instead -- this
+harness is unbiased but roughly four times noisier.
 """
 
 import numpy as np
 import torch
 
-from env import BelotEnv
-from observation import build_observation
+from belot.env import BelotEnv
+from belot.heuristic import _heuristic_action, _random_action
+from belot.observation import build_observation
 
 HIDDEN = 512
-
-# --- fixed greedy reference player (never changes, so it is comparable forever) ---
-_NT_POWER = {0: 0, 1: 1, 2: 2, 4: 3, 5: 4, 6: 5, 3: 6, 7: 7}
-_T_POWER  = {0: 0, 1: 1, 5: 2, 6: 3, 3: 4, 7: 5, 2: 6, 4: 7}
-_T_PTS    = {0: 0, 1: 0, 2: 14, 3: 10, 4: 20, 5: 3, 6: 4, 7: 11}
-_NT_PTS   = {0: 0, 1: 0, 2: 0, 3: 10, 4: 2, 5: 3, 6: 4, 7: 11}
-
-
-def _pw(c, tr): return (1, _T_POWER[c % 8]) if c // 8 == tr else (0, _NT_POWER[c % 8])
-def _pt(c, tr): return _T_PTS[c % 8] if c // 8 == tr else _NT_PTS[c % 8]
-
-
-def _heuristic_action(belot):
-    """Greedy: bid only on real trump strength; take tricks cheaply, else dump low."""
-    legal = np.flatnonzero(belot.get_legal_actions())
-    hand = belot.hands[belot.current_player]
-    if belot.phase == "BIDDING":
-        def strength(s, extra=None):
-            cards = [c for c in hand if c // 8 == s] + \
-                    ([extra] if extra is not None and extra // 8 == s else [])
-            return len(cards), sum(_T_PTS[c % 8] for c in cards)
-        if 33 in legal:
-            n, p = strength(belot.face_up_suit, extra=belot.face_up_card)
-            return 33 if (n >= 3 and p >= 20) or n >= 4 else 32
-        suits = [a - 34 for a in legal if a >= 34]
-        best = max(suits, key=lambda s: strength(s))
-        n, p = strength(best)
-        return 32 if (32 in legal and not (n >= 3 and p >= 20)) else 34 + best
-    tr, trick, cards = belot.trump, belot.current_trick, list(legal)
-    if not trick:
-        return max(cards, key=lambda c: _pw(c, tr)[1] - (3 if c // 8 == tr and _T_POWER[c % 8] < 6 else 0))
-    cur = max(_pw(c, tr) for _, c in trick)
-    cur_w = max(trick, key=lambda pc: _pw(pc[1], tr))[0]
-    partner = (cur_w % 2) == (belot.current_player % 2)
-    winners = [c for c in cards if _pw(c, tr) > cur]
-    if partner and len(trick) >= 2:
-        return (max(cards, key=lambda c: (_pt(c, tr), -_pw(c, tr)[1])) if len(trick) == 3
-                else min(cards, key=lambda c: (_pt(c, tr), _pw(c, tr)[1])))
-    if winners:
-        return min(winners, key=lambda c: _pw(c, tr)[1]) if len(trick) == 3 \
-            else max(winners, key=lambda c: _pw(c, tr)[1])
-    return min(cards, key=lambda c: (_pt(c, tr), _pw(c, tr)[1]))
 MAX_HANDS_PER_MATCH = 100     # safety valve; a match to 101 averages ~11 hands
 
 
@@ -89,11 +50,6 @@ def _net_action(net, belot, seat, hc, match_scores, device, greedy):
     return int(action.item()), new_hc
 
 
-def _random_action(belot):
-    legal = np.flatnonzero(belot.get_legal_actions())
-    return int(np.random.choice(legal))
-
-
 _PIMC_CACHE = {}
 
 
@@ -102,7 +58,7 @@ def _pimc_action(belot, D=16):
     yardstick ABOVE the model. Built on demand so importing eval.py stays cheap
     and so nothing pays for it unless it is actually used."""
     if D not in _PIMC_CACHE:
-        from pimc import make_pimc
+        from belot.search.pimc import make_pimc
         _PIMC_CACHE[D] = make_pimc(D=D, seed=0)
     return _PIMC_CACHE[D](belot)
 

@@ -37,7 +37,7 @@ contamination it exists to avoid.
 """
 import numpy as np
 
-from eval import _NT_POWER, _T_POWER, _T_PTS, _pt, _pw
+from belot.heuristic import _NT_POWER, _T_POWER, _T_PTS, _pt, _pw
 
 # MEASURED CALIBRATION. A threshold change alone gave only 7.6% bidding divergence
 # from the exact heuristic (v7_02, first pass). That is too mild for the job: the

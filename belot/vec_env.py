@@ -18,8 +18,8 @@ they never recorded.
 """
 
 import numpy as np
-from env import BelotEnv
-from observation import build_observation
+from belot.env import BelotEnv
+from belot.observation import build_observation
 
 
 class VectorizedBelot:

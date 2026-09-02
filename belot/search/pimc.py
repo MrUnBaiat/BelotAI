@@ -33,8 +33,8 @@ TWO DELIBERATE PROPERTIES, both needed for paired evaluation to stay valid:
 """
 import numpy as np
 
-from env import BelotEnv
-from eval import _heuristic_action
+from belot.env import BelotEnv
+from belot.heuristic import _heuristic_action
 
 _PLAY_FIELDS = ("hands", "trump", "declarer", "declaring_team", "defending_team",
                 "declarer_has_played_trump", "current_trick", "current_player",
