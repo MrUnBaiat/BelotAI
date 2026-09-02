@@ -1,10 +1,29 @@
+# --- build / tooling ------------------------------------------------------
 __pycache__
+.pytest_cache/
+.coverage
+htmlcov/
+temp
+
+# --- model weights and training output ------------------------------------
+# Checkpoints are not distributed with the repo; see README for how to obtain
+# or retrain them.
+*.pt
+*.npy
 checkpoints/
 runs/
-temp
+
+# --- local research record ------------------------------------------------
+# Kept on disk, never published: the phase-by-phase audit reports, the one-off
+# experiment scripts they were produced by, and the working notes.
+archive/
+audit_v9/
 backUp/
+Documents/
+AUDIT_*.md
+FINDINGS*.md
 toDo.md
-.coverage
-.pytest_cache/
-htmlcov/
-*.pt
+
+# --- assistant / editor configuration -------------------------------------
+CLAUDE.md
+.claude/
