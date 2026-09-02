@@ -1,0 +1,10 @@
+# Core. Any recent PyTorch works; the models are small and CPU is viable for
+# everything except training and the larger evaluations.
+torch>=2.0
+numpy>=1.24
+
+# Training curves.
+tensorboard>=2.12
+
+# Tests.
+pytest>=7.0

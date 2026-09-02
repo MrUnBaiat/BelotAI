@@ -1,36 +1,147 @@
-# Multi-Agent PPO for Belot (Trick-Taking Card Game)
+# Belot: a Recurrent MAPPO agent, and the search that beats it
 
-A high-performance, vectorized implementation of **Recurrent MAPPO (Multi-Agent Proximal Policy Optimization)** designed to master the complex, imperfect-information trick-taking card game, Belot. 
+An imperfect-information card-game agent for **Belot** — 32 cards, four players, two
+fixed partnerships — built in two halves that turned out to matter very differently:
 
-This repository leverages an in-process lockstep vectorization architecture, a Centralized Critic with Perfect Global Information (CTDE), and a custom belief-state heuristic matrix to train highly strategic game-playing agents.
+- a **Recurrent MAPPO** agent (PPO + LSTM, centralised critic) trained by self-play, and
+- an **exact double-dummy search** layered on top of it at play time.
 
----
+The strongest player is the composite of the two:
 
-## Key Achievements
-* **Robust Codebase:** Features a comprehensive `pytest` test suite boasting **92% code coverage** ensuring rigorous logic validation across complex card mechanics.
-* **Strong Emergent Play:** Successfully trained cooperative/competitive behavior. Agents have achieved excellent gameplay performance against reference baselines.
-* **Next Milestone:** Currently developing an interactive inference engine to evaluate agent performance in live matches against real human players (Belot.md).
+> **model bidding + model card play at tricks 0–2 + exact-solve PIMC (D=8) from trick 3**
+>
+> **+0.974 ± 0.175 pts/hand** over the bare agent (n=1500)
+> **+0.936 ± 0.243 pts/hand** against a held-out opponent (n=500)
+>
+> Identical-policy control exactly `0.000`.
 
----
+A per-hand edge compounds over a match to 101 (~11.5 hands): +1.0 pts/hand is about a
+**62% match win rate**.
 
-## Architecture & Features
-
-### 1. Vectorization Framework (`train.py`, `vec_env.py`)
-* **In-Process Lockstep Vectorization:** Avoids multi-processing overhead by managing $N$ independent `BelotEnv` instances inside a single process. It batches the expensive network forward passes by exposing the active agent's observation across all environments simultaneously.
-* **Precise Hidden-State Routing:** Manages sequential dependencies over asymmetric turns by tracking, splitting, and routing LSTM hidden states `(h, c)` on a per-seat, per-environment basis.
-* **Clean Episode Boundaries:** Discards incomplete, in-flight games at the end of a collection budget. This ensures that stored trajectories represent complete games where the GAE bootstrap value is unconditionally $0.0$, eliminating truncation bias.
-
-### 2. Algorithmic Implementation (`model.py`, `memory.py`)
-* **Recurrent MAPPO:** Combines shared-parameter Actor-Critic networks with an LSTM layer in the Actor to capture historical context over the course of an 8-trick hand. Especially useful for card counting.
-* **Centralized Training, Decentralized Execution (CTDE):** 
-  * **The Actor (`model.py`)** evaluates **Imperfect Local Information** (513-dimensional vector containing private cards, known board state, and tracking metrics) to output legal action distributions.
-  * **The Critic (`model.py`)** evaluates **Perfect Global Information** (332-dimensional vector containing absolute card locations and opponent hands) for low-variance state-value estimation during training.
-* **Dense Reward with Final True-Up:** Implements zero-sum step rewards scaled by trick values ($162$ points max). At the end of the episode, a terminal retroaction loop backs up true match-point goals ($16$ points max) into the trajectory, correcting rewards so the episode sum exactly matches the zero-sum strategic target.
+The other half of the project is the part I would actually point at: the agent
+plateaued, and the repository contains the measurements that say **why**, what the
+ceiling is, and which of a dozen plausible fixes are ruled out — with confidence
+intervals, pre-registered reading rules, and negative results reported as results.
+See **[docs/RESULTS.md](docs/RESULTS.md)**.
 
 ---
 
-## Training Performance & Diagnostics
+## Quick start
 
-### Key Metric
-* **Eval/PointDiffVsRandom:** Measures the true match-point differential per game. The trained policy achieves an average margin of **+5.5 points** out of a 16-point game maximum, demonstrating a decisive statistical dominance over the baseline.
-![Tensorboard PointDiffVsRandom image](pointDiff.png)
+```bash
+pip install -r requirements.txt
+
+python tools/check_env_rules.py          # game-rule invariants over 3,000 random games
+python tools/check_solver.py             # exact solver vs the engine at every state
+python tools/check_swap_control.py       # the evaluation instrument's control
+pytest -q                                # 20 tests
+
+python scripts/play.py                   # play one hand, card by card
+python scripts/evaluate.py --n 1500      # reproduce +0.974 ± 0.175  (~1.2 h)
+python scripts/train.py                  # train from scratch
+```
+
+**Weights are not distributed with this repository.** `scripts/play.py` and
+`scripts/evaluate.py` take `--ckpt`; `scripts/train.py` produces one. Everything under
+`tools/` that does not need a trained network runs immediately.
+
+---
+
+## Layout
+
+```
+belot/
+  env.py             the game: dealing, the auction, trick resolution, scoring
+  observation.py     513-dim actor view and 332-dim critic view
+  model.py           shared-parameter actor-critic; LSTM actor, stateless critic
+  memory.py          episodes, GAE, minibatching
+  vec_env.py         in-process lockstep vectorisation
+  heuristic.py       the fixed greedy reference player
+  search/
+    dd_solver.py     exact double-dummy solver (alpha-beta over bitboards)
+    pimc.py          determinization sampling and rollout PIMC
+    composite.py     THE PLAYER: network base + exact search from trick 3
+  evaluation/
+    swap_eval.py     swap-paired deals; the identical-policy control
+    match_eval.py    full matches to 101
+scripts/             train, play, evaluate
+tools/               13 correctness checks and measurement probes
+tests/               pytest suite
+docs/                game rules, and the results
+```
+
+---
+
+## The architecture
+
+**One parameter set plays all four seats.**
+
+- **Actor** (imperfect information): local observation `(513,)` → 512 → 512 →
+  `LSTM(512)` → 38 actions, illegal actions masked before the categorical.
+- **Critic** (perfect information, stateless): global observation `(332,)` → 512 →
+  512 → 1. The global view contains all four hands — centralised training,
+  decentralised execution.
+
+**In-process lockstep vectorisation.** N independent environments in one process,
+batching the one expensive shared operation — the forward pass — rather than paying
+multiprocessing overhead. LSTM state is tracked per `(env, seat)` and advanced only
+when that seat acts. Episodes still in flight at a rollout boundary are discarded, so
+every stored trajectory is complete and the GAE bootstrap is unconditionally zero.
+
+**Rewards are dense but the objective is not.** Each trick pays `±points/162`, and a
+terminal true-up corrects every seat so that its episode rewards sum **exactly** to
+`(gp_us − gp_them)/16`. The two disagree hand by hand — 162 raw card points map
+non-linearly onto 16 game points, and a declaring team on 80 or fewer scores zero —
+so the identity is asserted directly rather than assumed
+(`tools/check_reward_identity.py`, ~1e-16).
+
+**The search.** From trick 3, sample D worlds consistent with everything the acting
+seat can see, solve each exactly for every legal card, convert raw points to game
+points, and play the best total. Before trick 3 the network plays: with 24 unseen
+cards a single world's verdict is nearly uninformative, and searching there was
+measured at **−0.348 ± 0.309** — significantly worse.
+
+---
+
+## How the numbers were measured
+
+Belot's per-hand outcome swings by tens of game points on card luck, so an unpaired
+comparison of two decent policies is mostly noise. Every strength figure here uses
+**swap-paired deals**: each deal is played twice with the seat pairs exchanged, and
+the edge is `(dA − dB)/2`. Identical policies then cancel **deal by deal**, so the
+control returns exactly `0.000` with `max|edge|` exactly `0` — and when it does not,
+nothing from that run counts. Measured variance reduction: 1.9×–2.3× in standard
+deviation.
+
+Every figure carries a 95% confidence interval and its sample size, reading rules
+were fixed before each measurement ran, and results that came out negative are
+reported as results.
+
+---
+
+## What did not work, and why
+
+The agent plateaued after ~3,000 epochs, and the reason is structural: the
+policy-gradient update is **exactly zero** for a decision taken with probability
+1.000, and measured participation is **10.8%** — about one decision in nine carries
+any gradient. 660 further epochs were worth **+0.089 ± 0.286**.
+
+Seven attempts to get past that are documented with their measurements in
+[docs/RESULTS.md](docs/RESULTS.md), including a learned search evaluator, a learned
+belief network, expert iteration, two observation redesigns and Deep Monte Carlo on
+both card play and bidding. They share one cause: **the action-controllable part of a
+Belot outcome is about 1.2% of its variance**, so a value function trained on realised
+returns learns which deal it is holding rather than which card to play. The methods
+that work are the ones that *pair* the comparison and cancel the state term — which is
+what the search does.
+
+---
+
+## Requirements
+
+Python 3.10+, PyTorch, NumPy. `pytest` for the tests, `tensorboard` for training
+curves. See `requirements.txt`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
