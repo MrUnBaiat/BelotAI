@@ -113,6 +113,16 @@ def swap_edges(X, Y, n_deals, base_seed=BASE_SEED, pimc_seed_fn=None):
     return out
 
 
+def ci(e):
+    """95% confidence interval half-width on the mean of per-deal edges.
+
+    Returns exactly 0.0 for a degenerate sample, which is what the
+    identical-policy control produces and what makes `+0.000 +- 0.000` a
+    meaningful PASS rather than a division by zero.
+    """
+    return 1.96 * e.std(ddof=1) / np.sqrt(len(e)) if len(e) > 1 and e.std() > 0 else 0.0
+
+
 def summarise(name, e):
     ci = 1.96 * e.std(ddof=1) / np.sqrt(len(e)) if len(e) > 1 else float("nan")
     return f"{name:<34s} {e.mean():+.3f} +- {ci:.3f} pts/hand   (n={len(e)})"

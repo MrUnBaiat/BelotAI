@@ -45,7 +45,7 @@ from belot.heuristic import _heuristic_action
 from belot.model import RecurrentMAPPOModel
 from belot.observation import build_observation
 from belot.search.dd_solver import hands_to_masks, solve_root
-from belot.search.pimc import sample_determinization
+from belot.search.pimc import _playout, _scratch_env, sample_determinization
 
 HIDDEN = 512
 TOTAL_RAW = 162          # 152 in cards + 10 for the last trick
@@ -119,6 +119,47 @@ def make_dd_pimc(D=8, seed=0, min_trick=3):
                     continue
                 tot[i] += gp_diff_from_raw(collected0 + rem0,
                                            env.declaring_team, team)
+            n += 1
+        if n == 0:
+            return _heuristic_action(env)
+        return int(legal[int(np.argmax(tot))])
+
+    def reseed(s):
+        state["rng"] = np.random.default_rng(s)
+
+    return act, reseed
+
+
+def make_heur_pimc(D=8, seed=0, min_trick=3):
+    """The same search with the CHEAP evaluator: one greedy rollout per legal card
+    instead of an exact solve.
+
+    This is `pimc.py`'s shipped evaluator, gated to the same tricks so the two are
+    directly comparable. It exists as the honest baseline for the exact solver --
+    the +0.360 +- 0.204 quoted in this module's docstring is the paired difference
+    between the two, measured on identical deals.
+    """
+    state = {"rng": np.random.default_rng(seed)}
+    scratch = _scratch_env()
+
+    def act(env):
+        if env.phase == "BIDDING":
+            return _heuristic_action(env)
+        legal = np.flatnonzero(env.get_legal_actions())
+        if len(legal) == 1:
+            return int(legal[0])
+        if env.tricks_played < min_trick:
+            return _heuristic_action(env)
+        me = env.current_player
+        team = me % 2
+        tot = np.zeros(len(legal))
+        n = 0
+        for _ in range(D):
+            hands = sample_determinization(env, me, state["rng"])
+            if hands is None:
+                continue
+            for i, a in enumerate(legal):
+                tot[i] += _playout(scratch, env, hands, int(a), team)
             n += 1
         if n == 0:
             return _heuristic_action(env)
