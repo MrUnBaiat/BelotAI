@@ -112,12 +112,25 @@ def solve_world_for(position, seat, hands, legal):
 
     Works on a `BelotEnv` and on the SDK's `BelotState` alike, which is the whole point:
     the live adapter and the offline search share one solve.
+
+    `declaring_team` IS DERIVED RATHER THAN READ, and that is not defensive padding.
+    Offline it is set by `_finalize_bidding()` when the auction is played through. Live
+    it is not: the SDK reconstructs a state from server frames and assigns `declarer`
+    and `trump` directly, so `_finalize_bidding()` never runs. Measured on a real
+    capture: `declaring_team` is None in 410 of 410 play states. Reading it would send
+    None into `gp_diff_from_raw`, which evaluates `1 - declaring_team` -- a TypeError on
+    every searched decision, no move dispatched, the turn times out, and belot.md takes
+    the seat for the rest of the session. `declarer % 2` is the SDK's own definition
+    (`belotmd/game/state.py`), so deriving it is exact, not a guess.
     """
+    declaring_team = position.declaring_team
+    if declaring_team is None:
+        declaring_team = position.declarer % 2
     return solve_world(
         hands, seat,
         tuple((p, c) for p, c in position.current_trick),
         position.trump, position.declarer, position.declarer_has_played_trump,
-        position.raw_points_by_team[0], position.declaring_team, legal)
+        position.raw_points_by_team[0], declaring_team, legal)
 
 
 def make_dd_pimc(D=8, seed=0, min_trick=3):
