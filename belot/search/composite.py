@@ -77,6 +77,49 @@ def gp_diff_from_raw(raw0, declaring_team, team):
     return gp[team] - gp[1 - team]
 
 
+def solve_world(hands, seat, trick, trump, declarer, declarer_has_played_trump,
+                raw_points_team0, declaring_team, legal):
+    """Exactly solve ONE determinization and score every legal card, in game points.
+
+    This is the innermost step of the search, factored out so that the offline player
+    and the live one call the same code rather than two copies that drift. It takes
+    plain values, not an environment, because online the position arrives as a
+    `belotmd.game.state.BelotState` and offline as a `belot.env.BelotEnv` -- the two
+    carry identical field names but are unrelated classes.
+
+    `hands` is four card lists indexed by seat, already consistent with everything the
+    acting seat knows. `legal` is the card actions to score. Returns one score per entry
+    of `legal`, in the acting team's game points, so worlds sum comparably.
+
+    A card the solver has no value for scores 0 for this world -- it cannot be chosen on
+    that world's evidence, but neither is it penalised.
+    """
+    team = seat % 2
+    masks = hands_to_masks(hands)
+    _, vals, _ = solve_root(masks, seat, trick, trump, declarer,
+                            declarer_has_played_trump)
+    out = np.zeros(len(legal))
+    for i, a in enumerate(legal):
+        rem0 = vals.get(int(a))
+        if rem0 is None:
+            continue
+        out[i] = gp_diff_from_raw(raw_points_team0 + rem0, declaring_team, team)
+    return out
+
+
+def solve_world_for(position, seat, hands, legal):
+    """`solve_world` reading the position off an object with `env.py`'s field names.
+
+    Works on a `BelotEnv` and on the SDK's `BelotState` alike, which is the whole point:
+    the live adapter and the offline search share one solve.
+    """
+    return solve_world(
+        hands, seat,
+        tuple((p, c) for p, c in position.current_trick),
+        position.trump, position.declarer, position.declarer_has_played_trump,
+        position.raw_points_by_team[0], position.declaring_team, legal)
+
+
 def make_dd_pimc(D=8, seed=0, min_trick=3):
     """Perfect-information Monte Carlo whose leaf evaluation is an EXACT solve.
 
@@ -101,8 +144,8 @@ def make_dd_pimc(D=8, seed=0, min_trick=3):
         if env.tricks_played < min_trick:
             return _heuristic_action(env)
         me = env.current_player
-        team = me % 2
         collected0 = env.raw_points_by_team[0]
+        # hoisted out of the loop: neither changes between worlds
         trick = tuple((p, c) for p, c in env.current_trick)
         tot = np.zeros(len(legal))
         n = 0
@@ -110,15 +153,9 @@ def make_dd_pimc(D=8, seed=0, min_trick=3):
             hands = sample_determinization(env, me, state["rng"])
             if hands is None:
                 continue
-            masks = hands_to_masks(hands)
-            _, vals, _ = solve_root(masks, me, trick, env.trump, env.declarer,
-                                    env.declarer_has_played_trump)
-            for i, a in enumerate(legal):
-                rem0 = vals.get(int(a))
-                if rem0 is None:
-                    continue
-                tot[i] += gp_diff_from_raw(collected0 + rem0,
-                                           env.declaring_team, team)
+            tot += solve_world(hands, me, trick, env.trump, env.declarer,
+                               env.declarer_has_played_trump, collected0,
+                               env.declaring_team, legal)
             n += 1
         if n == 0:
             return _heuristic_action(env)
