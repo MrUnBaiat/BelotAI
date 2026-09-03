@@ -23,7 +23,15 @@ Documents/
 AUDIT_*.md
 FINDINGS*.md
 toDo.md
+agent-repo-handoff/
 
 # --- assistant / editor configuration -------------------------------------
 CLAUDE.md
 .claude/
+
+# --- live play: recordings and credentials --------------------------------
+# Frames carry other players' usernames and account ids; .env holds session
+# cookies for the account the bot plays as. Neither is ever published.
+frames*.jsonl
+sessions/
+.env
