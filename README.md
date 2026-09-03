@@ -34,11 +34,20 @@ pip install -r requirements.txt
 python tools/check_env_rules.py          # game-rule invariants over 3,000 random games
 python tools/check_solver.py             # exact solver vs the engine at every state
 python tools/check_swap_control.py       # the evaluation instrument's control
-pytest -q                                # 20 tests
+pytest -q                                # 41 tests
 
 python scripts/play.py                   # play one hand, card by card
 python scripts/evaluate.py --n 1500      # reproduce +0.974 ± 0.175  (~1.2 h)
 python scripts/train.py                  # train from scratch
+```
+
+Against real opponents on belot.md (see [Playing real people](#playing-real-people)):
+
+```bash
+python tools/verify_online.py FRAMES.jsonl --ckpt CKPT   # pre-flight, gates a run
+python scripts/play_online.py --no-search --once         # first run: network only
+python scripts/play_online.py --hours 4 --break-min 20   # continuous
+python tools/online_report.py                            # pts/hand vs humans, with a CI
 ```
 
 **Weights are not distributed with this repository.** `scripts/play.py` and
@@ -64,8 +73,10 @@ belot/
   evaluation/
     swap_eval.py     swap-paired deals; the identical-policy control
     match_eval.py    full matches to 101
-scripts/             train, play, evaluate
-tools/               13 correctness checks and measurement probes
+  online/
+    agent.py         the same player, adapted to a live belot.md table
+scripts/             train, play, evaluate, play_online
+tools/               15 correctness checks and measurement probes
 tests/               pytest suite
 docs/                game rules, and the results
 ```
@@ -136,6 +147,57 @@ that work are the ones that *pair* the comparison and cancel the state term — 
 what the search does.
 
 ---
+
+## Playing real people
+
+Every number above was measured against the agent itself or a frozen copy of it. The
+one opponent population none of it touched is human, so the player also runs live on
+belot.md through a separate SDK, `belotmd`, which owns the platform half: joining,
+auth, reconstructing a game state from a partial and often stale server feed,
+declarations, the seven-swap, retrying refused moves, and recording every raw frame.
+
+This repository supplies only the decision. `belot/online/agent.py` reuses the same
+encoder, the same network and the same solver as the offline player — there is no
+second copy of any of them to drift — and routes identically: bidding and tricks 0–2 to
+the network, tricks 3–7 to the exact search.
+
+**Three things are genuinely different online**, and each is handled rather than
+assumed away:
+
+- **You cannot see the other hands.** The server publishes placeholders of the correct
+  *length* for the other three seats, so reading them searches a fantasy and never
+  errors. All hidden-state information is read through the SDK's constraint bundle.
+- **Declared combinations pin cards.** A declared five-card run proves five specific
+  cards, and the SDK writes those into `known_cards` — which our encoder already reads.
+  So the worlds sampled online are *better* constrained than the ones the offline
+  +0.974 was measured with.
+- **There is a clock, and overrunning costs the seat.** 25 s to play a card; miss it
+  and belot.md hands the seat to its own bot for the rest of the session, after which
+  every message is ignored while the log keeps printing the cards we chose. The search
+  budgets against the deadline with a margin and never returns late. Measured on a real
+  capture: worst decision **0.53 s**, a 46× margin.
+
+`tools/verify_online.py` gates a run on five checks — rules parity against the SDK's
+rulebook (50,000 states, 0 disagreements), world legality, encoder parity, action
+parity against a saved baseline, and timing.
+
+### Measuring strength against humans is slow
+
+There is no swap-paired control online: a deal cannot be replayed with the seats
+exchanged. The instrument is the raw per-hand mean, whose standard deviation is about
+10.9 game points — roughly twenty times the effect being looked for:
+
+| target interval | hands needed |
+|---|---|
+| ±1.0 pts/hand | ~460 |
+| ±0.5 pts/hand | ~1,830 |
+| ±0.25 pts/hand | ~7,300 |
+
+`tools/online_report.py` prints the current interval beside those targets, so it is
+obvious when a number is still noise.
+
+Recordings are kept out of this repository: they contain other players' usernames and
+account ids.
 
 ## Requirements
 
