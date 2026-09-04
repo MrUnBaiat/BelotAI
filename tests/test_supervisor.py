@@ -19,6 +19,7 @@ ours, which quietly poisons the dataset as well as wasting the run.
 """
 
 import asyncio
+import json
 import os
 import sys
 import types
@@ -261,3 +262,92 @@ def test_an_interrupt_is_honoured_at_the_next_hand_boundary(monkeypatch):
     reason, _, _ = _watch(bot, _args(), monkeypatch, boundary_at=30)
     assert reason == "interrupted"
     assert bot.ticks == 30
+
+
+# ------------------------------------------------------------ one_session()
+#
+# A stretch is hours long. If its bookkeeping only survived the happy path, a run
+# stopped by a watchdog or killed by an exception would leave no trace of what it
+# did -- so the row is written from a `finally`, and that is worth checking rather
+# than asserting.
+
+class StubBot:
+    """Stands in for LiveBelotBot: runs until cancelled, or raises."""
+    raises = None
+
+    def __init__(self, cfg, agent=None):
+        self.cfg, self.agent = cfg, agent
+        self.frames_seen = 0
+        self.seat_bot_controlled = False
+        self.sync_engine = types.SimpleNamespace(hand_id=7)
+        self.client = types.SimpleNamespace(sessions_played=2)
+        self.cancelled = False
+
+    async def run(self):
+        if type(self).raises:
+            raise type(self).raises
+        try:
+            while True:
+                self.frames_seen += 1
+                self.agent.at_hand_boundary = True
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+class StubAgent:
+    def __init__(self):
+        self.stats = {"network": 3, "searched": 1, "fallback": 0,
+                      "solve_errors": 0}
+        self.max_decision_s = 0.4
+        self.agent_resets = 0
+        self.at_hand_boundary = False
+
+    def begin_session(self):
+        self.at_hand_boundary = False
+
+
+def _one_session(tmp_path, monkeypatch, raises=None, **argkw):
+    monkeypatch.setattr(P, "SESSION_DIR", str(tmp_path))
+    monkeypatch.setattr(P, "POLL_S", 0.001)
+    monkeypatch.setattr(P, "SupervisedBot", StubBot)
+    monkeypatch.setattr(StubBot, "raises", raises)
+    cfg = {}
+    monkeypatch.setattr(P.Config, "from_env",
+                        staticmethod(lambda **kw: cfg.update(kw)
+                                     or types.SimpleNamespace(**kw)))
+    args = _args(hours=0.0, **argkw)          # deadline already passed
+    row = asyncio.run(P.one_session(StubAgent(), args))
+    logged = [json.loads(x) for x in
+              (tmp_path / "log.jsonl").read_text(encoding="utf-8").splitlines()]
+    return row, logged, cfg
+
+
+def test_a_stretch_that_is_stopped_still_writes_its_row(tmp_path, monkeypatch):
+    row, logged, _ = _one_session(tmp_path, monkeypatch)
+    assert row["stop_reason"] == "stretch over"
+    assert logged == [row]
+    assert row["hands_dealt"] == 7 and row["tables"] == 2
+    assert row["error"] is None
+    assert row["started"] <= row["ended"]
+
+
+def test_a_stretch_that_raises_still_writes_its_row(tmp_path, monkeypatch):
+    """A crash inside the SDK must not also cost us the record of the run.
+
+    `await task` in the cleanup would re-raise it straight past the row write,
+    which is exactly what this caught.
+    """
+    row, logged, _ = _one_session(tmp_path, monkeypatch,
+                                  raises=RuntimeError("boom"))
+    assert row["error"] == "RuntimeError: boom"
+    assert row["stop_reason"] == "the session ended on its own"
+    assert logged == [row]
+
+
+def test_once_is_passed_through_to_the_sdk(tmp_path, monkeypatch):
+    """`--once` gating only this loop would leave the SDK playing on forever
+    underneath it, since it now finds a new table by itself."""
+    assert _one_session(tmp_path, monkeypatch, once=True)[2]["reconnect"] is False
+    assert _one_session(tmp_path, monkeypatch, once=False)[2]["reconnect"] is True

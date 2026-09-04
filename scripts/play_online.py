@@ -243,8 +243,10 @@ async def one_session(agent, args):
         # process was stopped would lose the whole night's accounting.
         if not task.done():
             task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        # `await task` would RE-RAISE whatever the SDK raised, straight out of
+        # this `finally` and past the row write -- losing the record of the very
+        # run that failed. gather() with return_exceptions collects it instead.
+        await asyncio.gather(task, return_exceptions=True)
         if task.done() and not task.cancelled() and task.exception():
             exc = task.exception()
             error = f"{type(exc).__name__}: {exc}"

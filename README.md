@@ -34,7 +34,7 @@ pip install -r requirements.txt
 python tools/check_env_rules.py          # game-rule invariants over 3,000 random games
 python tools/check_solver.py             # exact solver vs the engine at every state
 python tools/check_swap_control.py       # the evaluation instrument's control
-pytest -q                                # 41 tests
+pytest -q                                # 55 tests
 
 python scripts/play.py                   # play one hand, card by card
 python scripts/evaluate.py --n 1500      # reproduce +0.974 ± 0.175  (~1.2 h)
@@ -154,7 +154,8 @@ Every number above was measured against the agent itself or a frozen copy of it.
 one opponent population none of it touched is human, so the player also runs live on
 belot.md through a separate SDK, `belotmd`, which owns the platform half: joining,
 auth, reconstructing a game state from a partial and often stale server feed,
-declarations, the seven-swap, retrying refused moves, and recording every raw frame.
+declarations, the seven-swap, retrying refused moves, moving on to a new table when
+one dissolves, and recording every raw frame.
 
 This repository supplies only the decision. `belot/online/agent.py` reuses the same
 encoder, the same network and the same solver as the offline player — there is no
@@ -180,6 +181,25 @@ assumed away:
 `tools/verify_online.py` gates a run on five checks — rules parity against the SDK's
 rulebook (50,000 states, 0 disagreements), world legality, encoder parity, action
 parity against a saved baseline, and timing.
+
+`scripts/play_online.py` adds only what the SDK deliberately leaves to the account's
+owner: it counts seat takeovers **as they happen** and stops after a few, paces play
+into bounded stretches with breaks, and stops a run that has received no frames at
+all for two hours — because the SDK retries an empty lobby every five minutes
+forever, and an expired cookie looks exactly the same from outside it. Every stop
+waits for the end of the current hand.
+
+### What the first live sessions measured
+
+13 sessions, 5,626 frames, **109 scored hands**, **zero seat takeovers**. Replaying
+the recordings through the SDK's own synchronizer reproduces 958 of the 959 decisions
+taken live, and the search fired on **239 of 239** searchable ones with no fallbacks,
+no infeasible constraint sets and no solver faults. The worst decision took 2.94 s,
+and the least clock ever remaining at a decision was 12.0 s.
+
+Strength so far is **−1.29 ± 2.49 pts/hand (n=109)** — an interval twenty times wider
+than the effect, which is what the table above predicts at this sample size.
+Throughput is about 42 hands/hour, so ±0.5 is roughly 65 hours of play.
 
 ### Measuring strength against humans is slow
 
