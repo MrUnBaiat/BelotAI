@@ -246,26 +246,40 @@ def analyse(path):
 
 
 def decision_mix():
-    """The agent's own view of what it did, from the supervisor's session log."""
+    """The agent's own view of what it did, from the supervisor's session log.
+
+    `hands_dealt` comes from the synchronizer's own hand counter. The older
+    `hand_boundaries` field is deliberately not read: the SDK calls `agent.reset()`
+    on every lobby and end-phase frame, not once per hand, so across the first 13
+    live sessions it counted 326 against 119 hands actually dealt. Old rows are
+    still summed for everything else.
+    """
     p = os.path.join(SESSION_DIR, "log.jsonl")
     if not os.path.exists(p):
         return None
     keys = ("network", "searched", "fallback", "degraded", "infeasible",
-            "solve_errors", "worlds")
+            "solve_errors", "worlds", "hands_dealt", "tables", "seat_losses")
     tot = {k: 0 for k in keys}
-    sessions = seat_losses = 0
+    sessions = 0
     worst = 0.0
+    stops = collections.Counter()
     for line in open(p, encoding="utf-8"):
         try:
             row = json.loads(line)
         except Exception:
             continue
         sessions += 1
-        seat_losses += bool(row.get("seat_lost"))
         worst = max(worst, float(row.get("max_decision_s") or 0.0))
         for k in keys:
             tot[k] += int(row.get(k) or 0)
-    tot.update(sessions=sessions, seat_losses=seat_losses, worst_decision_s=worst)
+        # Rows written before seat losses were counted carry a bool instead.
+        if "seat_losses" not in row and row.get("seat_lost"):
+            tot["seat_losses"] += 1
+        if row.get("stop_reason"):
+            stops[row["stop_reason"]] += 1
+        if row.get("error"):
+            stops[f"ERROR {row['error']}"] += 1
+    tot.update(sessions=sessions, worst_decision_s=worst, stops=stops)
     return tot
 
 
@@ -339,6 +353,10 @@ def main():
     if mix:
         dec = mix["network"] + mix["searched"] + mix["fallback"]
         print(f"\n-- what the agent did ({mix['sessions']} logged sessions) --")
+        if mix["hands_dealt"]:
+            print(f"  hands dealt         {mix['hands_dealt']:,} "
+                  f"at {mix['tables']:,} table(s)   "
+                  f"({len(all_hands):,} of them scored)")
         if dec:
             print(f"  decisions           {dec:,}   "
                   f"network {100 * mix['network'] / dec:.1f}% / "
@@ -347,6 +365,10 @@ def main():
         print(f"  worlds solved       {mix['worlds']:,}")
         print(f"  worst decision      {mix['worst_decision_s']:.2f}s "
               f"of a 25s budget")
+        if mix["stops"]:
+            print("  how stretches ended:")
+            for why, n in mix["stops"].most_common():
+                print(f"    {n:3d}x  {why}")
         if mix["degraded"]:
             print(f"  degraded beliefs    {mix['degraded']:,} decisions fell back "
                   f"(joined mid-hand; not searchable)")
