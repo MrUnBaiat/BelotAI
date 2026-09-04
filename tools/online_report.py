@@ -29,9 +29,20 @@ table, all of them observed in real captures:
     happened.
   * once belot.md flags our seat as bot-controlled, the cards played at our seat are
     the platform bot's. Those hands measure the platform, not us, and are excluded.
+
+AND THE ONE THAT ACTUALLY BIT. **Our seat is not fixed for a recording.** Before a match
+starts the host may rotate players around the table to set up teams (close code 4005);
+nobody is removed, only seat indices move. Reading our seat from the FIRST frame -- which
+this tool used to do -- therefore reads a PRE-ROTATION seat, and since the team is
+`seat % 2`, a rotation of odd parity silently inverts the sign of every hand in that
+recording. It did: 7 of the first 109 hands were counted for the wrong team, moving the
+headline from +0.174 to -1.294. The seat is now taken from frames where the match was
+actually being played, per span, and each span's per-hand deltas are reconciled against
+its own final cumulative row -- the arithmetic check that would have caught it.
 """
 
 import argparse
+import collections
 import glob
 import json
 import math
@@ -41,6 +52,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SESSION_DIR = "sessions"
+
+# A match is under way from the first bid onward. Frames below this phase are the
+# lobby, where the host can still rotate seats -- so they are exactly the frames a
+# seat must NOT be read from.
+MATCH_PHASE = 6                                    # protocol.TRUMP_CHOOSE_1
 
 # The SDK's own frame parsing. Reused rather than reimplemented: `split_sessions`
 # encodes a hard-won lesson about which key does NOT delimit a match, and a second
@@ -64,15 +80,39 @@ def ci95(xs):
     return 1.96 * math.sqrt(var / n)
 
 
-def my_seat(recs):
-    """Our seat, from the recorded player id against the players table."""
-    for r in recs:
-        pid = r.get("pid")
-        if not pid:
-            continue
-        for p in r["state"].get("players", []) or []:
-            if str(p.get("id")) == str(pid):
-                return int(p.get("position"))
+def seat_in_frame(rec):
+    """Our seat in ONE frame, resolved by player id rather than remembered.
+
+    Resolving per frame is what makes this robust to a lobby seat rotation: the
+    players table in the frame is the authority on where we are sitting at that
+    moment, and it costs nothing to ask it every time.
+    """
+    pid = rec.get("pid")
+    if not pid:
+        return None
+    for p in rec["state"].get("players", []) or []:
+        if str(p.get("id")) == str(pid):
+            return int(p.get("position"))
+    return None
+
+
+def my_seat(recs, playing_only=True):
+    """The seat we actually PLAYED, as the modal seat over in-match frames.
+
+    `playing_only=False` falls back to any frame, for spans that never started a
+    match (a table that dissolved in the lobby) -- those carry no scored hands, so
+    the answer only affects diagnostics.
+    """
+    for require_match in ((True, False) if playing_only else (False,)):
+        counts = collections.Counter()
+        for r in recs:
+            if require_match and r["state"].get("currentPhase", 0) < MATCH_PHASE:
+                continue
+            seat = seat_in_frame(r)
+            if seat is not None:
+                counts[seat] += 1
+        if counts:
+            return counts.most_common(1)[0][0]
     return None
 
 
@@ -81,11 +121,14 @@ def takeover_index(recs):
 
     Everything from there on is the platform bot playing our cards. Returns None if
     it never happened, which is the outcome to hope for.
+
+    The seat is resolved per frame, so a lobby rotation cannot make this read some
+    other player's `bot` flag.
     """
-    seat = my_seat(recs)
-    if seat is None:
-        return None
     for i, r in enumerate(recs):
+        seat = seat_in_frame(r)
+        if seat is None:
+            continue
         players = r["state"].get("players", []) or []
         if seat < len(players) and players[seat].get("bot"):
             return i
@@ -137,25 +180,56 @@ def per_hand(table):
     return out
 
 
+def reconcile(table, rows):
+    """Summed per-hand deltas must land on the table's own final cumulative row.
+
+    The check that would have caught the seat-parity bug, the bolt markers and the
+    cancelled-deal duplicates alike: it compares this tool's arithmetic against a
+    number the server itself published. A cell carrying a `BT-n` marker states no
+    total, so it is skipped rather than guessed at.
+    """
+    problems = []
+    last = next((r for r in reversed(table)
+                 if isinstance(r, list) and len(r) >= 2), None)
+    if last is None or not rows:
+        return problems
+    for t in (0, 1):
+        cell = last[t]
+        if bolt_marker(cell) is not None:
+            continue
+        if not isinstance(cell, (int, float)) or isinstance(cell, bool):
+            continue
+        total = sum(r[t] for r in rows)
+        if abs(total - float(cell)) > 1e-9:
+            problems.append(f"team {t}: hands sum to {total:g}, but the table's "
+                            f"own final row says {cell}")
+    return problems
+
+
 def analyse(path):
     """One recording -> a list of per-hand results from OUR team's point of view."""
     recs = load(path)
     if not recs:
         return [], {"file": os.path.basename(path), "note": "empty"}
 
-    seat = my_seat(recs)
     cut = takeover_index(recs)
     if cut is not None:
         recs = recs[:cut]              # drop the platform bot's play entirely
 
     hands = []
     matches = 0
+    seats, problems = set(), []
     for span in split_sessions(recs):
         table = final_table(span)
         rows = per_hand(table)
         if not rows:
             continue
         matches += 1
+        # Per span, not per file: a recording can hold several matches, and the
+        # host reseats between them.
+        seat = my_seat(span)
+        seats.add(seat)
+        problems += reconcile(table, rows)
         team = (seat % 2) if seat is not None else 0
         for d0, d1, b0, b1 in rows:
             ours, theirs = (d0, d1) if team == 0 else (d1, d0)
@@ -164,8 +238,10 @@ def analyse(path):
             hands.append({"diff": ours - theirs, "us": ours, "them": theirs,
                           "bolt_us": bolt_us, "bolt_them": bolt_them})
 
-    meta = {"file": os.path.basename(path), "seat": seat, "matches": matches,
-            "truncated_at_takeover": cut is not None}
+    meta = {"file": os.path.basename(path), "seat": sorted(s for s in seats
+                                                           if s is not None),
+            "matches": matches, "truncated_at_takeover": cut is not None,
+            "problems": problems}
     return hands, meta
 
 
@@ -221,6 +297,12 @@ def main():
     if dropped:
         print(f"  {len(dropped)} recording(s) TRUNCATED at a seat takeover -- "
               f"everything after it was the platform bot, not us")
+    bad = [(m, p) for m in metas for p in m.get("problems") or []]
+    if bad:
+        print(f"\n  SCORE TABLE DOES NOT RECONCILE -- treat every number below as "
+              f"suspect:")
+        for m, p in bad:
+            print(f"    {m['file']}: {p}")
 
     if not all_hands:
         print("\n  no scored hands yet")

@@ -1,18 +1,22 @@
 """
 Reading belot.md's score table.
 
-Three things distort a naive read, all observed in real captures, and each one
+Four things distort a naive read, all observed in real captures, and each one
 silently produces a plausible-looking wrong number rather than an error:
 
   * a bolted team's cell is the marker `BT-n`, not a score;
   * a cancelled deal appends a DUPLICATE cumulative row and scores nothing;
-  * the table is cumulative, so a hand is a difference, not a cell.
+  * the table is cumulative, so a hand is a difference, not a cell;
+  * **our seat is not fixed** -- the host may rotate players around the table
+    before the match starts, and since the team is `seat % 2`, reading the seat
+    from the first frame can invert the sign of every hand in a recording.
 
 The fixture below is the real final table from a recorded session. Its per-team
 totals must reconcile with its own last row -- which is the check that would have
-caught every one of those three.
+caught every one of those four.
 """
 
+import json
 import os
 import sys
 
@@ -81,3 +85,77 @@ def test_ci95_is_nan_on_a_single_observation():
     import math
     assert math.isnan(ci95([3.0]))
     assert ci95([1.0, 2.0, 3.0]) > 0
+
+
+# --------------------------------------------------------------- the seat
+
+PID = "me-42"
+
+
+def _frame(seat, phase, table, bot=False):
+    """One recorded frame with us sitting at `seat`."""
+    players = [{"id": f"p{i}", "position": i, "bot": False} for i in range(4)]
+    players[seat] = {"id": PID, "position": seat, "bot": bot}
+    return {"pid": PID,
+            "state": {"currentPhase": phase, "players": players,
+                      "scoreTable": json.dumps(table)}}
+
+
+def _recording(tmp_path, frames, name="frames_x.jsonl"):
+    p = tmp_path / name
+    p.write_text("".join(json.dumps(f) + "\n" for f in frames), encoding="utf-8")
+    return str(p)
+
+
+# Team 0 wins every hand by 16-0. Whichever seat we hold decides the sign.
+TABLE = [[16, 0], [32, 0], [48, 0]]
+
+
+def test_the_seat_comes_from_play_not_from_the_first_frame(tmp_path):
+    """The bug that cost 7 of the first 109 hands their sign.
+
+    We sit at seat 1 in the lobby, the host rotates us to seat 2 before the deal,
+    and we play the whole match from seat 2 -- team 0, which won every hand here.
+    Reading the lobby seat instead gives team 1 and inverts all three.
+    """
+    frames = ([_frame(1, 0, [])] * 3          # lobby, pre-rotation
+              + [_frame(2, 2, [])]            # rotated, deck cut
+              + [_frame(2, 6, TABLE[:1]),
+                 _frame(2, 10, TABLE[:2]),
+                 _frame(2, 14, TABLE)])
+    path = _recording(tmp_path, frames)
+
+    assert online_report.my_seat(online_report.load(path)) == 2
+    hands, meta = online_report.analyse(path)
+    assert meta["seat"] == [2]
+    assert [h["diff"] for h in hands] == [16.0, 16.0, 16.0]
+
+
+def test_a_seat_held_throughout_is_unaffected(tmp_path):
+    """The control: with no rotation the answer must not move."""
+    frames = [_frame(1, 0, []), _frame(1, 6, TABLE[:1]),
+              _frame(1, 10, TABLE[:2]), _frame(1, 14, TABLE)]
+    hands, meta = online_report.analyse(_recording(tmp_path, frames))
+    assert meta["seat"] == [1]
+    assert [h["diff"] for h in hands] == [-16.0, -16.0, -16.0]
+
+
+def test_a_takeover_is_found_at_our_rotated_seat(tmp_path):
+    """`takeover_index` resolves the seat per frame, so a rotation cannot make it
+    read some other player's `bot` flag -- or miss ours."""
+    frames = [_frame(1, 0, []), _frame(2, 6, TABLE[:1]),
+              _frame(2, 10, TABLE[:2], bot=True), _frame(2, 14, TABLE)]
+    recs = online_report.load(_recording(tmp_path, frames))
+    assert online_report.takeover_index(recs) == 2
+    # and the hands after it are dropped rather than credited to us
+    hands, meta = online_report.analyse(_recording(tmp_path, frames))
+    assert meta["truncated_at_takeover"]
+    assert len(hands) == 1
+
+
+def test_a_table_that_does_not_reconcile_is_reported():
+    """A silent wrong number is the failure mode this whole module guards
+    against, so the arithmetic is checked against the server's own final row."""
+    assert online_report.reconcile(REAL, per_hand(REAL)) == []
+    # one hand dropped: the remaining deltas can no longer reach [108, 62]
+    assert online_report.reconcile(REAL, per_hand(REAL)[1:])
