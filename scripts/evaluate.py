@@ -4,11 +4,12 @@ Measure the composite player's strength on the swap-paired instrument.
     python scripts/evaluate.py --ckpt checkpoints/v8_exp/expd_latest.pt --n 1500
 
 WHAT THIS MEASURES. `model bidding + model card play at tricks 0-2 + exact-solve
-PIMC (D=8) from trick 3` against the bare network, on identical deals. Reference
-figures, both with the control at exactly zero:
+PIMC (D=128) from trick 3` against the bare network, on identical deals. Reference
+figures, all with the control at exactly zero:
 
-    +0.974 +- 0.175  vs the bare agent          (n=1500)
-    +0.936 +- 0.243  vs a held-out frozen net   (n=500,  --opponent FROZEN.pt)
+    +1.270 +- 0.197  vs the bare agent          (n=1000, D=128)
+    +0.835 +- 0.219  vs the bare agent          (n=1000, D=8)
+    +0.936 +- 0.243  vs a held-out frozen net   (n=500,  D=8, --opponent FROZEN.pt)
 
 WHY SWAP-PAIRED. Belot's per-hand outcome swings by tens of game points on card
 luck alone, so an unpaired comparison of two decent policies is mostly noise. Each
@@ -23,8 +24,10 @@ The search's determinization draw is NOT cancelled by pairing, so its generator 
 reseeded per deal. Skipping that once left 67% of a headline interval as
 uncancelled search noise.
 
-COST. About 2.9 s per deal at D=8 on a laptop GPU, so n=1500 is roughly 1.2 hours
-and n=60 is a ~3 minute smoke test. The control always runs first; if it fails the
+COST. Measured on a laptop GPU: about 2.4 s per deal at D=8 and 30.6 s at D=128,
+so n=500 is ~20 min at D=8 and ~4.3 h at D=128. `tools/dd_depth_sweep.py` plays
+both arms in one interleaved loop instead, which pairs them on deals as well as
+seats and is far cheaper per unit of resolution. The control always runs first; if it fails the
 script exits without spending the rest.
 """
 
@@ -40,7 +43,8 @@ import torch
 
 import belot.evaluation.swap_eval as SW
 from belot.evaluation.swap_eval import ci
-from belot.search.composite import load_model, make_dd_pimc, model_backed
+from belot.search.composite import (DEFAULT_D, load_model, make_dd_pimc,
+                                    model_backed)
 
 DEFAULT_CKPT = os.path.join("checkpoints", "v8_exp", "expd_latest.pt")
 
@@ -54,7 +58,7 @@ def main():
                          "(i.e. the composite against its own bare network)")
     ap.add_argument("--n", type=int, default=1500)
     ap.add_argument("--n-control", type=int, default=30)
-    ap.add_argument("--D", type=int, default=8)
+    ap.add_argument("--D", type=int, default=DEFAULT_D)
     ap.add_argument("--min-trick", type=int, default=3)
     a = ap.parse_args()
 

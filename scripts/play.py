@@ -20,7 +20,7 @@ import torch
 
 from belot.env import BelotEnv
 from belot.heuristic import _heuristic_action
-from belot.search.composite import build_player
+from belot.search.composite import DEFAULT_D, build_player
 
 DEFAULT_CKPT = os.path.join("checkpoints", "v8_exp", "expd_latest.pt")
 SUITS = "shdc"          # spades hearts diamonds clubs -- ASCII, because a
@@ -41,7 +41,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default=DEFAULT_CKPT)
     ap.add_argument("--deal", type=int, default=0, help="deal seed")
-    ap.add_argument("--D", type=int, default=8)
+    ap.add_argument("--D", type=int, default=DEFAULT_D)
     ap.add_argument("--min-trick", type=int, default=3)
     a = ap.parse_args()
 

@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
+from belot.search.composite import DEFAULT_D
 from belotmd import Infeasible, constraints, sample_determinization
 from belotmd.game.belief import belief_matrix
 from belotmd.platform.sync import StateSynchronizer
@@ -235,7 +236,7 @@ def check_actions(path, ckpt, baseline=None, save_to=None):
 
 
 # ------------------------------------------------------------ 4. timing
-def check_timing(path, ckpt, worlds=8, budget=25.0):
+def check_timing(path, ckpt, worlds=DEFAULT_D, budget=25.0):
     try:
         from belot.online.agent import build
     except Exception as exc:
@@ -274,7 +275,7 @@ def main():
     ap.add_argument("--baseline", default=None,
                     help="JSON file of a previously recorded action list")
     ap.add_argument("--save-baseline", default=None)
-    ap.add_argument("--worlds", type=int, default=8)
+    ap.add_argument("--worlds", type=int, default=DEFAULT_D)
     ap.add_argument("--skip-rules", action="store_true")
     args = ap.parse_args()
 

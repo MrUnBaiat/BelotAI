@@ -1,12 +1,13 @@
 """
 The composite player -- the strongest Belot agent this project produced.
 
-    model bidding + model card play at tricks 0-2 + exact-solve PIMC (D=8) from trick 3
+    model bidding + model card play at tricks 0-2 + exact-solve PIMC (D=128) from trick 3
 
 Measured on the swap-paired instrument, identical-policy control exactly zero:
 
-    +0.974 +- 0.175 pts/hand over the bare agent          (n=1500)
-    +0.936 +- 0.243 pts/hand against a held-out opponent  (n=500)
+    +1.270 +- 0.197 pts/hand over the bare agent          (n=1000, D=128)
+    +0.835 +- 0.219 pts/hand over the bare agent          (n=1000, D=8)
+    +0.936 +- 0.243 pts/hand vs a held-out opponent       (n=500,  D=8)
 
 WHY THIS CONFIGURATION AND NOT ANOTHER. Every parameter below is a measurement, not
 a preference:
@@ -18,9 +19,31 @@ a preference:
                   Searching tricks 0-2 on their own saturates near +0.2 even at
                   D=128, so the window is not worth buying at any affordable price.
 
-  D = 8           Doubling to D=16 was measured as equal strength at equal cost, so
-                  D=8 is the cheaper of two equals. The determinization axis is flat
-                  in this window.
+  D = 128         Worth +0.435 +- 0.208 pts/hand over D=8, swap-paired on identical
+                  deals: +0.378 +- 0.291 on deals 0-499 and +0.492 +- 0.297 on a
+                  REPLICATION over deals 500-999 that no earlier measurement had
+                  touched (the two agree, z = +0.54). Pooled n=1000: bootstrap
+                  [+0.226, +0.645] over 20k resamples, and the arms diverged on 458
+                  deals of which D=128 won 272 and lost 186, sign test p = 0.00007.
+
+                  THIS OVERTURNS WHAT THIS DOCSTRING USED TO SAY. It claimed "D=16
+                  was measured as equal strength at equal cost... the determinization
+                  axis is flat in this window", and generalised a null measured at
+                  ONE doubling into a property of the whole axis. The 8-vs-16 null
+                  stands; the axis is flat near 8 and rises by 128. The audit's own
+                  record already disagreed with the general claim -- 07_BUILD.md
+                  reports the rollout-PIMC teacher going +0.003 (D=8) -> +0.317
+                  (D=16) -> +0.483 (D=32) against the model -- so the evidence was
+                  there and the summary had smoothed it away.
+
+                  Cost is not the constraint it was assumed to be. Measured on real
+                  captured positions, per exact solve: 0.031 s at trick 3, 0.005 s at
+                  trick 4, 0.0007 s at trick 5, 0.0001 s at trick 6. So a whole D=128
+                  decision runs 0.52 s median and 7.94 s worst against belot.md's 25 s
+                  turn clock -- see `tools/verify_online.py --worlds 128`.
+
+                  Where on the 8 -> 128 curve the gain begins is NOT measured. D=32
+                  is 5x cheaper per decision and may well capture most of it.
 
   exact solve     An exact double-dummy solve of each determinization beats the
                   cheap greedy rollout by +0.360 +- 0.204 from trick 3 onward. That
@@ -49,6 +72,11 @@ from belot.search.pimc import _playout, _scratch_env, sample_determinization
 
 HIDDEN = 512
 TOTAL_RAW = 162          # 152 in cards + 10 for the last trick
+
+# Determinizations per searched decision. One number, so the offline player, the
+# live player and every tool move together -- a config that drifts between them is
+# how a measured result stops describing what is actually deployed.
+DEFAULT_D = 128
 
 
 def gp_diff_from_raw(raw0, declaring_team, team):
@@ -133,7 +161,7 @@ def solve_world_for(position, seat, hands, legal):
         position.raw_points_by_team[0], declaring_team, legal)
 
 
-def make_dd_pimc(D=8, seed=0, min_trick=3):
+def make_dd_pimc(D=DEFAULT_D, seed=0, min_trick=3):
     """Perfect-information Monte Carlo whose leaf evaluation is an EXACT solve.
 
     Sample `D` worlds consistent with everything the acting seat can see, solve each
@@ -188,6 +216,11 @@ def make_heur_pimc(D=8, seed=0, min_trick=3):
     directly comparable. It exists as the honest baseline for the exact solver --
     the +0.360 +- 0.204 quoted in this module's docstring is the paired difference
     between the two, measured on identical deals.
+
+    D STAYS AT 8 HERE, deliberately, while the deployed player moved to DEFAULT_D.
+    That +0.360 was measured with BOTH sides at D=8; raising only this one would
+    silently redefine the baseline and make the recorded number describe a
+    comparison nobody ran. Pass D explicitly to sweep it.
     """
     state = {"rng": np.random.default_rng(seed)}
     scratch = _scratch_env()
@@ -270,7 +303,7 @@ def load_model(ckpt, device=None):
     return net
 
 
-def build_player(ckpt, D=8, min_trick=3, seed=0, device=None):
+def build_player(ckpt, D=DEFAULT_D, min_trick=3, seed=0, device=None):
     """The deployable player, in one call.
 
     Returns `(act, reset, reseed)`:

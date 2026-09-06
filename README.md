@@ -8,10 +8,10 @@ fixed partnerships — built in two halves that turned out to matter very differ
 
 The strongest player is the composite of the two:
 
-> **model bidding + model card play at tricks 0–2 + exact-solve PIMC (D=8) from trick 3**
+> **model bidding + model card play at tricks 0–2 + exact-solve PIMC (D=128) from trick 3**
 >
-> **+0.974 ± 0.175 pts/hand** over the bare agent (n=1500)
-> **+0.936 ± 0.243 pts/hand** against a held-out opponent (n=500)
+> **+1.270 ± 0.197 pts/hand** over the bare agent (n=1000)
+> **+0.435 ± 0.208 pts/hand** of that comes from D=128 over D=8, replicated on fresh deals
 >
 > Identical-policy control exactly `0.000`.
 
@@ -37,7 +37,8 @@ python tools/check_swap_control.py       # the evaluation instrument's control
 pytest -q                                # 55 tests
 
 python scripts/play.py                   # play one hand, card by card
-python scripts/evaluate.py --n 1500      # reproduce +0.974 ± 0.175  (~1.2 h)
+python scripts/evaluate.py --n 500       # reproduce +1.270 ± 0.197  (~4.3 h, D=128)
+python tools/dd_depth_sweep.py --n 500    # D=8 vs D=128, paired on deals (~2 h)
 python scripts/train.py                  # train from scratch
 ```
 
@@ -112,6 +113,13 @@ points, and play the best total. Before trick 3 the network plays: with 24 unsee
 cards a single world's verdict is nearly uninformative, and searching there was
 measured at **−0.348 ± 0.309** — significantly worse.
 
+**D = 128.** Worth **+0.435 ± 0.208** over D=8, swap-paired on identical deals and
+replicated on 500 deals no earlier run had touched (bootstrap `[+0.226, +0.645]`,
+sign test `p = 0.00007`). This corrects an earlier claim in this repository that the
+determinization axis was flat — it is flat near 8 and rises by 128. It is also free:
+a D=128 decision runs **0.52 s median, 7.94 s worst** against belot.md's 25 s turn
+clock. See [docs/RESULTS.md §3.1](docs/RESULTS.md).
+
 ---
 
 ## How the numbers were measured
@@ -171,12 +179,16 @@ assumed away:
 - **Declared combinations pin cards.** A declared five-card run proves five specific
   cards, and the SDK writes those into `known_cards` — which our encoder already reads.
   So the worlds sampled online are *better* constrained than the ones the offline
-  +0.974 was measured with.
+  numbers were measured with. The SDK also reads a run's EDGES: a declared run is
+  reported maximally, so the ranks just outside it are provably not held — about 3.7
+  extra excluded cards per hand, validated at 143 exclusions and **zero** false voids
+  against fully-known hands.
 - **There is a clock, and overrunning costs the seat.** 25 s to play a card; miss it
   and belot.md hands the seat to its own bot for the rest of the session, after which
   every message is ignored while the log keeps printing the cards we chose. The search
-  budgets against the deadline with a margin and never returns late. Measured on a real
-  capture: worst decision **0.53 s**, a 46× margin.
+  budgets against the deadline with a margin and never returns late. Measured on real
+  captured positions at the deployed D=128: **0.52 s median, 7.94 s worst**, and no
+  decision truncated. Trick 0 is out of reach at any D — one solve there costs 8.2 s.
 
 `tools/verify_online.py` gates a run on five checks — rules parity against the SDK's
 rulebook (50,000 states, 0 disagreements), world legality, encoder parity, action

@@ -57,6 +57,7 @@ from belotmd import Config
 from belotmd.bot import LiveBelotBot
 
 from belot.online.agent import CompositeAgent
+from belot.search.composite import DEFAULT_D
 
 DEFAULT_CKPT = os.path.join("checkpoints", "v8_exp", "expd_latest.pt")
 SESSION_DIR = "sessions"
@@ -368,9 +369,11 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt", default=DEFAULT_CKPT)
-    ap.add_argument("--worlds", type=int, default=8,
-                    help="determinizations per searched decision (default 8, the "
-                         "configuration the offline +0.974 was measured with)")
+    ap.add_argument("--worlds", type=int, default=DEFAULT_D,
+                    help=f"determinizations per searched decision (default "
+                         f"{DEFAULT_D}, worth +0.435 +- 0.208 pts/hand over D=8 and "
+                         f"measured at 0.52 s median / 7.94 s worst against the "
+                         f"25 s turn clock)")
     ap.add_argument("--no-search", action="store_true",
                     help="network only -- what the FIRST live run should use, so a "
                          "clean session proves the encoder and the platform loop "

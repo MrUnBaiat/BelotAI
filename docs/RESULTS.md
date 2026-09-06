@@ -53,29 +53,76 @@ Reproduce the first row with `python tools/heuristic_baseline.py`.
 
 ## 3. The deliverable
 
-**Model bidding + model card play at tricks 0–2 + exact-solve PIMC (D=8) from
+**Model bidding + model card play at tricks 0–2 + exact-solve PIMC (D=128) from
 trick 3.**
 
 | | pts/hand | n |
 |---|---|---|
-| vs the bare network | **+0.974 ± 0.175** | 1500 |
-| vs a held-out frozen network | **+0.936 ± 0.243** | 500 |
+| vs the bare network, **D=128** | **+1.270 ± 0.197** | 1000 |
+| vs the bare network, D=8 | +0.835 ± 0.219 | 1000 |
+| vs the bare network, D=8 (earlier run) | +0.974 ± 0.175 | 1500 |
+| vs a held-out frozen network, D=8 | +0.936 ± 0.243 | 500 |
 
-Both with the identical-policy control at exactly zero. `scripts/evaluate.py`
-reproduces the first row in about 1.2 hours.
+All with the identical-policy control at exactly zero.
 
 Every parameter is a measurement rather than a preference:
 
 | choice | why |
 |---|---|
 | search starts at **trick 3** | extending it into tricks 0–2 measured **−0.348 ± 0.309** — significantly worse. At trick 0 there are 24 unseen cards, so one determinization's verdict is nearly uninformative and searching adds variance, not skill. |
-| **D = 8** | D=16 measured as equal strength at equal cost, so D=8 is the cheaper of two equals. |
+| **D = 128** | worth **+0.435 ± 0.208** over D=8, swap-paired on identical deals and **replicated** on deals no earlier run had touched. See §3.1. |
 | **exact** solve, not rollout | worth **+0.360 ± 0.204** from trick 3 on. The same upgrade at trick 2 is worth **+0.015 ± 0.339** — nothing. |
 | bidding left to the **network** | see §6. |
 
 **The base is worth the entire effect.** The identical search on a greedy-heuristic
 base scores **−1.188**; on the network base, **+0.614**. The network's job is to hand
 good positions to the search.
+
+### 3.1 D = 128, and a claim this file used to make
+
+This file previously said *"D=16 measured as equal strength at equal cost, so D=8 is
+the cheaper of two equals."* That null is real. The generalisation drawn from it —
+that the determinization axis is flat — was not measured, and is wrong.
+
+`tools/dd_depth_sweep.py` plays both arms in **one interleaved loop**. Because
+`swap_eval._play` seeds each deal from a fixed `BASE_SEED`, deal *d* is the same deal
+in every run this project has done, so the arms are paired on **deals as well as
+seats** and the per-deal difference cancels card luck a second time.
+
+| run | deals | D=8 | D=128 | paired D128 − D8 |
+|---|---|---|---|---|
+| 1 | 0–499 | +0.992 ± 0.307 | +1.370 ± 0.287 | **+0.378 ± 0.291** |
+| 2 (replication) | 500–999 | +0.678 ± 0.311 | +1.170 ± 0.271 | **+0.492 ± 0.297** |
+| pooled | 1000 | +0.835 ± 0.219 | +1.270 ± 0.197 | **+0.435 ± 0.208** |
+
+Run 2 used deals no measurement in this project had ever played. The two runs agree
+(run2 − run1 = +0.114, z = +0.54). Pooled: bootstrap **[+0.226, +0.645]** over 20k
+resamples; the arms diverged on **458/1000** deals, D=128 winning 272 and losing 186,
+**sign test p = 0.00007**. All four identical-policy controls returned exactly
+`+0.000 ± 0.000` with `max|edge|` exactly `0`.
+
+The audit record already pointed this way and the summary had smoothed it away:
+`audit_v9/07_BUILD.md` reports the rollout-PIMC teacher going **+0.003 (D=8) → +0.317
+(D=16) → +0.483 (D=32)** against the model.
+
+**Cost.** One exact solve, measured on real captured online positions:
+
+| trick | mean per solve | trick | mean per solve |
+|---|---|---|---|
+| 1 | 1.468 s | 4 | 0.0051 s |
+| 2 | 0.325 s | 5 | 0.0007 s |
+| 3 | 0.031 s | 6 | 0.0001 s |
+
+A whole decision at D=128 from trick 3 therefore runs **0.52 s median, 5.28 s at p99,
+7.94 s worst**, against belot.md's 25 s turn clock — no decision was ever truncated.
+Trick 0 is unreachable at any D: a *single* solve there costs 8.2 s median.
+
+**Not measured:** where on the 8 → 128 curve the gain begins. D=32 costs 0.11 s
+median per decision and may capture most of it.
+
+**What replay cannot do.** Re-scoring recorded hands at a different D gives timing
+and decision changes exactly, and strength not at all — once a different card is
+played, the opponents' replies are a counterfactual that was never observed.
 
 ---
 

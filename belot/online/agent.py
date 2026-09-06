@@ -32,7 +32,7 @@ from belotmd import Infeasible, constraints, sample_determinization
 
 from belot.model import RecurrentMAPPOModel
 from belot.observation import build_observation
-from belot.search.composite import solve_world_for
+from belot.search.composite import DEFAULT_D, solve_world_for
 
 HIDDEN_DIM = 512
 
@@ -56,7 +56,7 @@ class CompositeAgent:
 
     name = "composite"
 
-    def __init__(self, checkpoint=None, worlds=8, device=None,
+    def __init__(self, checkpoint=None, worlds=DEFAULT_D, device=None,
                  search=True, safety_margin=SAFETY_MARGIN_S, seed=None,
                  check_worlds=False):
         self.device = torch.device(
@@ -232,7 +232,7 @@ def build(**kwargs):
     """Build a CompositeAgent. Keyword values may arrive as strings, so coerce."""
     return CompositeAgent(
         checkpoint=kwargs.get("checkpoint"),
-        worlds=int(kwargs.get("worlds", 8)),
+        worlds=int(kwargs.get("worlds", DEFAULT_D)),
         device=kwargs.get("device"),
         search=kwargs.get("search", True),
         safety_margin=float(kwargs.get("safety_margin", SAFETY_MARGIN_S)),
