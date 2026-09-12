@@ -258,7 +258,8 @@ def decision_mix():
     if not os.path.exists(p):
         return None
     keys = ("network", "searched", "fallback", "degraded", "infeasible",
-            "solve_errors", "worlds", "hands_dealt", "tables", "seat_losses")
+            "solve_errors", "worlds", "melded", "hands_dealt", "tables",
+            "seat_losses")
     tot = {k: 0 for k in keys}
     sessions = 0
     worst = 0.0
@@ -363,6 +364,10 @@ def main():
                   f"searched {100 * mix['searched'] / dec:.1f}% / "
                   f"fell back {100 * mix['fallback'] / dec:.1f}%")
         print(f"  worlds solved       {mix['worlds']:,}")
+        if mix["searched"]:
+            print(f"  melds on the table  {mix['melded']:,} of {mix['searched']:,} searched "
+                  f"decisions ({100 * mix['melded'] / mix['searched']:.1f}%) -- scored "
+                  f"the platform's way (0 before the meld-aware agent)")
         print(f"  worst decision      {mix['worst_decision_s']:.2f}s "
               f"of a 25s budget")
         if mix["stops"]:

@@ -370,10 +370,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt", default=DEFAULT_CKPT)
     ap.add_argument("--worlds", type=int, default=DEFAULT_D,
-                    help=f"determinizations per searched decision (default "
-                         f"{DEFAULT_D}, worth +0.435 +- 0.208 pts/hand over D=8 and "
-                         f"measured at 0.52 s median / 7.94 s worst against the "
-                         f"25 s turn clock)")
+                    help=f"determinizations per searched decision (default {DEFAULT_D}). "
+                         f"Re-measured in the game belot.md scores: D=32 over D=8 is "
+                         f"+0.303 +- 0.264, D=128 over D=32 is +0.031 +- 0.264 -- nothing "
+                         f"measurable. Timing at D=128 on real positions: 0.20 s median "
+                         f"but 23.2 s worst against the 25 s clock, the tail entirely at "
+                         f"trick 3. --worlds 32 is ~4x cheaper for no measurable strength "
+                         f"cost and leaves far more clock")
     ap.add_argument("--no-search", action="store_true",
                     help="network only -- what the FIRST live run should use, so a "
                          "clean session proves the encoder and the platform loop "

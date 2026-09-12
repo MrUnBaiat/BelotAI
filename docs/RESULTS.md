@@ -65,6 +65,25 @@ trick 3.**
 
 All with the identical-policy control at exactly zero.
 
+**Scored in the simulator's game, which has no melds.** belot.md counts declared
+combinations in the bolt test and in the stakes. Measured on the same deals scored both
+ways, the conversion above has an edge over the network about 0.2 pts/hand smaller under
+the platform's rule (−0.200 ± 0.171 at D=32, −0.172 ± 0.211 at D=128, n=800 and 600),
+and the meld-aware conversion now deployed online does not lose it (+0.256 ± 0.181,
++0.483 ± 0.219). The offline player is unchanged — with no melds the two conversions are
+identical by construction — so this table stands as a measurement of the simulator's
+game. `research/v10_search/FINDINGS.md` §13 has the rule, its validation and the pricing.
+Head to head, the corrected conversion is worth **+0.174 ± 0.122 pts/hand** over the
+deployed one (n=2,000, three independent deal ranges, all six controls exactly zero) —
+about a sixth of what the whole search from trick 3 is worth. The simulator can now score
+the platform's game itself: `BelotEnv.melds = True`, or `swap_edges(..., melds=True)`
+(`belot/melds.py`). Future offline numbers should use it.
+
+**The determinization ladder was re-measured in that game** (`research/v10_search` x22,
+n=600): the D=128-over-D=8 gain transfers (the meld-free-scoring shrinkage is
+−0.013 ± 0.216), but the curve saturates by D=32 — D32 − D8 = +0.303 ± 0.264 against
+D128 − D32 = +0.031 ± 0.264, at 3.55 vs 13.41 s per paired deal.
+
 Every parameter is a measurement rather than a preference:
 
 | choice | why |

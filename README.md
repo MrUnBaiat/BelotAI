@@ -183,12 +183,28 @@ assumed away:
   reported maximally, so the ranks just outside it are provably not held — about 3.7
   extra excluded cards per hand, validated at 143 exclusions and **zero** false voids
   against fully-known hands.
+- **The hand is scored differently.** belot.md bolts the declaring team on trick points
+  *plus* declared combinations, and pays 16 + all combinations/10 rather than a flat
+  16 — a rule read off 897 recorded hands and reproduced on every one of them. The
+  simulator has no melds, so the solver used to aim every world at a fixed line of 81;
+  the platform moves that line on two hands in three, by 25 or more points on one in
+  five. Online the search now converts every world with the combinations the server has
+  settled (public from trick 3, `state.combinations`) plus bela per world while it is
+  still hidden — `composite.gp_diff_platform` — and takes the old conversion, exactly,
+  when nothing is declared. Priced against the network on **2,000 paired deals across
+  three independent deal ranges: +0.174 ± 0.122 pts/hand**, and whenever it changes a late
+  card the new card is significantly better under the platform's own scoring. Every
+  offline number in this file was measured in the meld-free game, which flatters the old
+  conversion by about 0.2 pts/hand (`research/v10_search/FINDINGS.md` §13). The simulator
+  can now score the platform's game too: `BelotEnv.melds = True`.
 - **There is a clock, and overrunning costs the seat.** 25 s to play a card; miss it
   and belot.md hands the seat to its own bot for the rest of the session, after which
   every message is ignored while the log keeps printing the cards we chose. The search
   budgets against the deadline with a margin and never returns late. Measured on real
-  captured positions at the deployed D=128: **0.52 s median, 7.94 s worst**, and no
-  decision truncated. Trick 0 is out of reach at any D — one solve there costs 8.2 s.
+  captured positions at the deployed D=128: **0.52 s median, 7.94 s worst** on the first
+  recordings; over an 11.5 h run of 4,238 decisions the worst was **23.2 s**, the guard
+  cut 35 of 169,088 worlds, and no seat was lost. Trick 0 is out of reach at any D — one
+  solve there costs 8.2 s.
 
 `tools/verify_online.py` gates a run on five checks — rules parity against the SDK's
 rulebook (50,000 states, 0 disagreements), world legality, encoder parity, action
@@ -210,8 +226,9 @@ no infeasible constraint sets and no solver faults. The worst decision took 2.94
 and the least clock ever remaining at a decision was 12.0 s.
 
 Strength so far is **−1.29 ± 2.49 pts/hand (n=109)** — an interval twenty times wider
-than the effect, which is what the table above predicts at this sample size.
-Throughput is about 42 hands/hour, so ±0.5 is roughly 65 hours of play.
+than the effect, which is what the table above predicts at this sample size. After
+912 scored hands it stands at **+0.46 ± 0.88**, still not distinguishable from zero.
+Throughput is about 42 hands/hour, so ±0.5 is roughly 45 more hours of play.
 
 ### Measuring strength against humans is slow
 

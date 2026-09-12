@@ -50,7 +50,7 @@ def _arm(base, D, min_trick, dev):
     return model_backed(base, act, min_trick, dev), reseed
 
 
-def control(base, D, min_trick, dev, n):
+def control(base, D, min_trick, dev, n, melds=False):
     """The composite against itself. Must be exactly zero."""
     (xf, xr), reseed = _arm(base, D, min_trick, dev)
     (yf, yr), reseed2 = _arm(base, D, min_trick, dev)
@@ -58,10 +58,10 @@ def control(base, D, min_trick, dev, n):
     for d in range(n):
         reseed(11_000 + d); reseed2(11_000 + d)
         xr(); yr()
-        a = SW._play(d, xf, yf)
+        a = SW._play(d, xf, yf, melds=melds)
         reseed(11_000 + d); reseed2(11_000 + d)
         xr(); yr()
-        b = SW._play(d, yf, xf)
+        b = SW._play(d, yf, xf, melds=melds)
         out[d] = (a - b) / 2.0
     return out
 
@@ -79,6 +79,10 @@ def main():
                          "`deal %% 4`, and seat-rotation symmetry is what makes "
                          "the paired control cancel exactly.")
     ap.add_argument("--out", default=OUT)
+    ap.add_argument("--melds", action="store_true",
+                    help="score the platform's game -- combinations in the bolt test "
+                         "and the stakes (belot/melds.py). The recorded sweep was "
+                         "measured without; research/v10_search x22 re-measures it with.")
     a = ap.parse_args()
     if a.deal_offset % 4:
         sys.exit("--deal-offset must be a multiple of 4 (dealer rotation)")
@@ -88,11 +92,12 @@ def main():
     gstate = np.random.get_state()          # never disturb the global stream
     base = load_model(a.ckpt, dev)
 
-    print(f"device {dev}   deals {a.n}   arms D={Ds} from trick {a.min_trick}",
+    print(f"device {dev}   deals {a.n}   arms D={Ds} from trick {a.min_trick}   "
+          f"scoring {'PLATFORM (melds)' if a.melds else 'meld-free'}",
           flush=True)
 
     for D in Ds:
-        c = control(base, D, a.min_trick, dev, a.n_control)
+        c = control(base, D, a.min_trick, dev, a.n_control, melds=a.melds)
         ok = np.abs(c).max() == 0.0
         print(f"CONTROL D={D:<4} {c.mean():+.3f} +- {ci(c):.3f}  "
               f"max|edge| {np.abs(c).max():.2e}  -> {'PASS' if ok else 'FAIL'}",
@@ -115,9 +120,9 @@ def main():
             xf, xr, reseed = arms[D]
             yf, yr = net
             reseed(12_000 + d); xr(); yr()
-            dA = SW._play(d, xf, yf)
+            dA = SW._play(d, xf, yf, melds=a.melds)
             reseed(12_000 + d); xr(); yr()
-            dB = SW._play(d, yf, xf)
+            dB = SW._play(d, yf, xf, melds=a.melds)
             edges[D].append((dA - dB) / 2.0)
 
         done = i + 1
