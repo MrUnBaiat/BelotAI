@@ -15,6 +15,16 @@ class BelotEnv:
         
         # New: Track ongoing dense rewards to calculate the final true-up
         self.accumulated_dense_rewards = [0.0, 0.0, 0.0, 0.0]
+
+        # Score the hand the way belot.md does: declared combinations count in the bolt
+        # test and the stakes, a team with no trick loses -10 and its combinations, and
+        # every seat declares everything offered (belot/melds.py, validated on 897
+        # recorded hands). OFF by default -- the game the network was trained in and
+        # every recorded number was measured in has no melds -- and when off nothing
+        # here changes. Set it BEFORE reset(): a face-up Jack finalizes bidding inside
+        # reset(), and the combinations are read off the hands at that moment.
+        self.melds = False
+        self.meld_totals = None       # (c_team0, c_team1) once play begins, else None
         self.reset()
 
     def reset(self):
@@ -60,6 +70,7 @@ class BelotEnv:
         # Reset episode accumulated rewards
         self.accumulated_dense_rewards = [0.0, 0.0, 0.0, 0.0]
         self.done = False
+        self.meld_totals = None
 
         # Forced Jack Exception
         if self.face_up_rank == 4: # Jack
@@ -91,7 +102,15 @@ class BelotEnv:
             else:
                 self.hands[p].extend(self.deck[:3])
                 self.deck = self.deck[3:]
-                
+
+        # The combinations are a property of the eight-card hands, so they can be settled
+        # here: live they are declared up to the last card of trick 2 and confirmed once
+        # trick 2 completes, then scored at the end of the hand (belot/melds.py).
+        if getattr(self, "melds", False):
+            from belot.melds import deal_melds
+            self.meld_totals = deal_melds([list(h) for h in self.hands], self.trump,
+                                          leader=self.declarer)["total"]
+
         # Declarer leads the first trick
         self.current_player = self.declarer
 
@@ -348,6 +367,8 @@ class BelotEnv:
 
     def _calculate_final_rewards(self):
         """This is run at the end of the episode (8 tricks)"""
+        if getattr(self, "melds", False):
+            return self._platform_final_rewards()
         game_points = [0, 0]
         bolt_occurred = False
         
@@ -390,6 +411,29 @@ class BelotEnv:
                 self.bolts_by_team[self.declaring_team] = 0 
 
         return [game_points[0], game_points[1], game_points[0], game_points[1]]
+
+    def _platform_final_rewards(self):
+        """belot.md's scoring (`belot.melds.platform_points`): combinations in the bolt
+        test and the stakes, the capot, the tie, and the third bolt.
+
+        The bolt counter is kept exactly as the original branch keeps it, so a match's
+        third-bolt penalty fires on the same hand either way. One documented difference:
+        a DECLARING team that takes no trick is scored -10 without a bolt, as the platform
+        shows it (a numeric -10, no BT marker); the original branch counts it as a bolt.
+        That case never occurred in 897 recorded hands.
+        """
+        from belot.melds import platform_points
+        dt, dfn = self.declaring_team, self.defending_team
+        c = self.meld_totals if self.meld_totals is not None else (0, 0)
+        raw = self.raw_points_by_team
+        b = platform_points(raw, c, dt, self.tricks_won_by_team,
+                            third_bolt=(self.bolts_by_team[dt] == 2))
+        capot = 0 in self.tricks_won_by_team
+        if not capot and raw[dt] + c[dt] < raw[dfn] + c[dfn]:
+            self.bolts_by_team[dt] += 1
+            if self.bolts_by_team[dt] == 3:
+                self.bolts_by_team[dt] = 0
+        return [b[0], b[1], b[0], b[1]]
 
     def _get_observation(self):
         return {

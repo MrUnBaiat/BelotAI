@@ -33,9 +33,11 @@ class StubComposite(CompositeAgent):
         kw.setdefault("seed", 0)
         super().__init__(**kw)
         self.solves = 0
+        self.scored = []          # (c, hands) handed to every solve
 
-    def _solve_world(self, state, seat, hands, legal):
+    def _solve_world(self, state, seat, hands, legal, c=(0, 0)):
         self.solves += 1
+        self.scored.append((tuple(c), [list(h) for h in hands]))
         return self.rng.random(len(legal))
 
 
@@ -145,6 +147,59 @@ def test_a_missing_clock_does_not_crash(agent):
     s.deadline = None
     _act(agent, s)
     assert agent.stats["searched"] == 1
+
+
+# ------------------------------------------------------------ combinations
+# belot.md bolts on trick points PLUS combinations and pays 16 + all/10; the search
+# must score every world with the combinations the hand will actually be scored with.
+
+def test_nothing_declared_scores_worlds_meld_free(agent):
+    """The fixture's trump Q and K are already in the graveyard and nothing is
+    declared, so every world is scored exactly as the offline player would."""
+    _act(agent, _mid_hand(SEARCH_FROM_TRICK))
+    assert agent.scored, "no world was solved"
+    assert all(c == (0, 0) for c, _ in agent.scored)
+    assert agent.stats["melded"] == 0
+
+
+def test_declared_combinations_reach_every_solve(agent):
+    """Seat 1: a four-run (50) and bela (20); seat 3: a three-run (20). Team 1
+    therefore carries 90 into the bolt test, and every world must be scored with
+    it -- bela is declared, so nothing is left to attribute per world."""
+    s = _mid_hand(SEARCH_FROM_TRICK)
+    s.combinations = ["", "2l|5k", "", "1t"]
+    _act(agent, s)
+    assert all(c == (0, 90) for c, _ in agent.scored)
+    assert agent.stats["melded"] == 1
+
+
+def test_a_hidden_bela_is_scored_per_world():
+    """Trump 0: Q (5) and K (6) are unseen and undeclared. In a world where one
+    seat holds both, that seat's team gets +20; otherwise nothing."""
+    a = StubComposite(worlds=64)
+    s = _mid_hand(SEARCH_FROM_TRICK)
+    s.trump = 0
+    s.declarer_has_played_trump = True
+    _act(a, s)
+    assert a.scored
+    attributed = 0
+    for c, hands in a.scored:
+        holder = next((p for p, h in enumerate(hands) if 5 in h and 6 in h), None)
+        if holder is None:
+            assert c == (0, 0)
+        else:
+            attributed += 1
+            assert c == ((20, 0) if holder % 2 == 0 else (0, 20))
+    assert attributed > 0, "64 worlds and none put the pair in one hand"
+    assert a.stats["melded"] == 0        # nothing DECLARED on the table
+
+
+def test_an_older_state_without_the_field_still_searches(agent):
+    s = _mid_hand(SEARCH_FROM_TRICK)
+    del s.combinations
+    _act(agent, s)
+    assert agent.stats["searched"] == 1
+    assert all(c == (0, 0) for c, _ in agent.scored)
 
 
 def _same_hidden(a, b):

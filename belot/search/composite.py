@@ -64,6 +64,7 @@ is to hand good positions to the search, and it is worth the entire effect.
 import numpy as np
 import torch
 
+from belot import melds
 from belot.heuristic import _heuristic_action
 from belot.model import RecurrentMAPPOModel
 from belot.observation import build_observation
@@ -105,8 +106,51 @@ def gp_diff_from_raw(raw0, declaring_team, team):
     return gp[team] - gp[1 - team]
 
 
+def platform_points(raw, c, declaring_team, third_bolt=False):
+    """belot.md's match points (b0, b1) for one hand, from each team's raw trick points
+    AND its combination (meld) points -- the rule the platform actually pays.
+
+    The simulator has no melds, so `gp_diff_from_raw` scores every world against a fixed
+    line (raw <= 80) with fixed 16-point stakes. The platform does not: read off 897
+    recorded hands (research/v10_search FINDINGS §13, 897/897 reproduced) it is
+
+        bolted  iff  raw_dec + c_dec <  raw_def + c_def
+                     the defenders take 16 + (c_dec + c_def) // 10, the declarer's
+                     combinations included
+        tie          raw_dec + c_dec == raw_def + c_def: each team rounds its own
+                     total; the declarer is never bolted on a tie
+        made         b_def = bile(raw_def + c_def),  b_dec = 16 + all // 10 - b_def
+
+    The line moves on two recorded hands in three, and the mean stake is 19.2, not 16.
+
+    With c == (0, 0) this IS `gp_diff_from_raw`'s branch: the two raw totals sum to 162,
+    so raw_dec < raw_def is raw_dec <= 80, the only tie is 81/81 and scores 8/8 either
+    way, and the stakes are 16. `tests/test_platform_scoring.py` pins that identity on
+    every raw0. The capot (-10, melds void) is not modelled, for the reason the
+    zero-tricks rule is not: the solver carries no trick counts.
+
+    `third_bolt`: a team's THIRD bolt costs it a further 10, on the platform and in the
+    env alike (`env._calculate_final_rewards`, counter mod 3). The declaring team goes
+    into 9.5% of recorded hands on two bolts. MEASURED AND NOT WIRED INTO THE AGENT: with
+    the third bolt live on every deal, a search that knows it scores +0.005 +- 0.134 over
+    one that does not (research/v10_search x24, n=400) -- the search already aims at the
+    bolt line, and the size of the penalty rarely changes which card clears it. The
+    parameter serves the research harness.
+
+    The rule itself lives in `belot.melds`, which `BelotEnv(melds=True)` scores whole
+    hands with; this is the solver's view of it (no trick counts, so no capot).
+    """
+    return melds.platform_points(raw, c, declaring_team, None, third_bolt)
+
+
+def gp_diff_platform(raw0, declaring_team, team, c, third_bolt=False):
+    """`gp_diff_from_raw` under the platform's rule; identical to it when c == (0, 0)
+    and the third bolt is not live."""
+    return melds.gp_diff(raw0, declaring_team, team, c, third_bolt)
+
+
 def solve_world(hands, seat, trick, trump, declarer, declarer_has_played_trump,
-                raw_points_team0, declaring_team, legal):
+                raw_points_team0, declaring_team, legal, c=(0, 0), third_bolt=False):
     """Exactly solve ONE determinization and score every legal card, in game points.
 
     This is the innermost step of the search, factored out so that the offline player
@@ -121,21 +165,30 @@ def solve_world(hands, seat, trick, trump, declarer, declarer_has_played_trump,
 
     A card the solver has no value for scores 0 for this world -- it cannot be chosen on
     that world's evidence, but neither is it penalised.
+
+    `c` is each team's COMBINATION points to score this world with. Offline it is
+    (0, 0) -- the simulator has no melds -- and the conversion is `gp_diff_from_raw`
+    unchanged, by construction rather than by equivalence. Online it is what the
+    platform will add to the trick points (`gp_diff_platform`). `third_bolt` says the
+    declaring team's next bolt is its third (-10 more).
     """
     team = seat % 2
     masks = hands_to_masks(hands)
     _, vals, _ = solve_root(masks, seat, trick, trump, declarer,
                             declarer_has_played_trump)
+    platform = bool(c[0] or c[1]) or third_bolt
     out = np.zeros(len(legal))
     for i, a in enumerate(legal):
         rem0 = vals.get(int(a))
         if rem0 is None:
             continue
-        out[i] = gp_diff_from_raw(raw_points_team0 + rem0, declaring_team, team)
+        r0 = raw_points_team0 + rem0
+        out[i] = (gp_diff_platform(r0, declaring_team, team, c, third_bolt) if platform
+                  else gp_diff_from_raw(r0, declaring_team, team))
     return out
 
 
-def solve_world_for(position, seat, hands, legal):
+def solve_world_for(position, seat, hands, legal, c=(0, 0), third_bolt=False):
     """`solve_world` reading the position off an object with `env.py`'s field names.
 
     Works on a `BelotEnv` and on the SDK's `BelotState` alike, which is the whole point:
@@ -156,9 +209,10 @@ def solve_world_for(position, seat, hands, legal):
         declaring_team = position.declarer % 2
     return solve_world(
         hands, seat,
-        tuple((p, c) for p, c in position.current_trick),
+        tuple((p, card) for p, card in position.current_trick),
         position.trump, position.declarer, position.declarer_has_played_trump,
-        position.raw_points_by_team[0], declaring_team, legal)
+        position.raw_points_by_team[0], declaring_team, legal, c=c,
+        third_bolt=third_bolt)
 
 
 def make_dd_pimc(D=DEFAULT_D, seed=0, min_trick=3):

@@ -77,8 +77,12 @@ def scripted_policy(action_fn):
     return action_fn, (lambda: None)
 
 
-def _play(deal, even_fn, odd_fn, base_seed=BASE_SEED):
+def _play(deal, even_fn, odd_fn, base_seed=BASE_SEED, melds=False):
+    """One deal. `melds=True` scores it the way belot.md does -- combinations in the bolt
+    test and the stakes (`belot/melds.py`) -- which is the game the live player plays;
+    the default is the meld-free game every recorded number was measured in."""
     env = BelotEnv()
+    env.melds = melds                       # before reset(): a face-up Jack finalizes there
     env.dealer = deal % 4
     np.random.seed(base_seed + deal)        # fixes the deal, and only the deal
     env.reset()
@@ -91,12 +95,13 @@ def _play(deal, even_fn, odd_fn, base_seed=BASE_SEED):
     return gp[0] - gp[1]
 
 
-def swap_edges(X, Y, n_deals, base_seed=BASE_SEED, pimc_seed_fn=None):
+def swap_edges(X, Y, n_deals, base_seed=BASE_SEED, pimc_seed_fn=None, melds=False):
     """Per-deal edge of policy X over policy Y, duplicate-bridge paired.
 
     X, Y are (action_fn, reset_fn) pairs from net_policy / scripted_policy.
     `pimc_seed_fn(deal)` optionally re-seeds a search player's private RNG so both
-    orientations of a deal draw from the same stream position.
+    orientations of a deal draw from the same stream position. `melds=True` scores the
+    platform's game (see `_play`).
     """
     (xf, xr), (yf, yr) = X, Y
     out = np.empty(n_deals, dtype=np.float64)
@@ -104,11 +109,11 @@ def swap_edges(X, Y, n_deals, base_seed=BASE_SEED, pimc_seed_fn=None):
         if pimc_seed_fn:
             pimc_seed_fn(d)
         xr(); yr()
-        dA = _play(d, xf, yf, base_seed)     # X on even seats
+        dA = _play(d, xf, yf, base_seed, melds)     # X on even seats
         if pimc_seed_fn:
             pimc_seed_fn(d)
         xr(); yr()
-        dB = _play(d, yf, xf, base_seed)     # X on odd seats
+        dB = _play(d, yf, xf, base_seed, melds)     # X on odd seats
         out[d] = (dA - dB) / 2.0
     return out
 

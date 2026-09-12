@@ -21,6 +21,14 @@ The one genuinely online input is free: our encoder already reads `known_cards` 
 `impossible_cards`, and that is exactly where the SDK writes the card pins it decodes
 from declared combinations. Self-play never had those, so the worlds sampled here are
 better constrained than the ones the offline number was measured on.
+
+THE HAND IS SCORED THE WAY BELOT.MD SCORES IT. The simulator has no melds; the platform
+bolts the declaring team on trick points PLUS combination points and pays 16 + all
+combinations/10 (read off 897 recorded hands, 897/897 reproduced -- research/v10_search
+FINDINGS §13). The line moves on two hands in three. So every world is converted with
+`composite.gp_diff_platform` using the combinations the server has already settled
+(`state.combinations`, public from trick 3), plus bela scored per world while both trump
+Q and K are still unplayed. With nothing declared this is the old conversion exactly.
 """
 
 import time
@@ -29,12 +37,15 @@ import numpy as np
 import torch
 
 from belotmd import Infeasible, constraints, sample_determinization
+from belotmd.game import combinations as combo
+from belotmd.platform.protocol import ASCII_TO_ID
 
 from belot.model import RecurrentMAPPOModel
 from belot.observation import build_observation
 from belot.search.composite import DEFAULT_D, solve_world_for
 
 HIDDEN_DIM = 512
+QUEEN, KING = 5, 6
 
 # Play switches to search at this trick. Measured offline: searching earlier is
 # significantly WORSE (-0.348 +- 0.309), because with 24 unseen cards a single
@@ -83,7 +94,9 @@ class CompositeAgent:
         self.hidden = self._zero_hidden()
         self.stats = {"network": 0, "searched": 0, "fallback": 0,
                       "infeasible": 0, "degraded": 0, "worlds": 0,
-                      "solve_errors": 0}
+                      "solve_errors": 0,
+                      # searched decisions with combinations declared on the table
+                      "melded": 0}
         # Worst wall-clock spent on one decision. The number that says whether the
         # 25 s budget is comfortable or whether the seat is one slow turn from lost.
         self.max_decision_s = 0.0
@@ -183,6 +196,7 @@ class CompositeAgent:
             return None
 
         legal = np.flatnonzero(np.asarray(legal_mask))
+        c_pub, bela_hidden, pair = self._combination_points(state)
         totals = np.zeros(38, dtype=np.float64)
         solved = 0
 
@@ -199,7 +213,9 @@ class CompositeAgent:
                 break
 
             try:
-                totals[legal] += self._solve_world(state, seat, hands, legal)
+                totals[legal] += self._solve_world(
+                    state, seat, hands, legal,
+                    self._world_c(c_pub, bela_hidden, pair, hands))
             except Exception as exc:                          # noqa: BLE001
                 # NEVER let a solver fault reach the SDK. An exception escaping `act`
                 # means no move is dispatched, the turn times out, and the seat is
@@ -214,17 +230,60 @@ class CompositeAgent:
         if solved == 0:
             return None
         self.stats["worlds"] += solved
+        if c_pub != (0, 0):
+            self.stats["melded"] += 1
 
         scores = np.where(np.asarray(legal_mask).astype(bool), totals, -np.inf)
         return int(np.argmax(scores))
 
-    def _solve_world(self, state, seat, hands, legal):
+    def _solve_world(self, state, seat, hands, legal, c=(0, 0)):
         """One exact double-dummy solve, scored in game points.
 
         Shares `belot.search.composite.solve_world` with the offline player, so the
         live search is the same computation rather than a reimplementation of it.
+        `c` is the combination points this world is scored with.
         """
-        return solve_world_for(state, seat, hands, legal)
+        return solve_world_for(state, seat, hands, legal, c=c)
+
+    # --------------------------------------------------------- combinations
+    @staticmethod
+    def _combination_points(state):
+        """What the platform will add to each team's trick points, as far as it is
+        public: (c_team0, c_team1), whether a bela may still be hidden, and the
+        trump Q/K pair to look for.
+
+        Runs and four-of-a-kinds may be declared up to the last card of trick 2;
+        once trick 2 completes the server confirms the winners and removes the
+        losers, so from trick 3 -- where this searches -- the field IS the contest
+        result. Bela is announced only when the first of the trump Q/K pair is
+        played; until then whoever holds both is scored per world. A state without
+        the field (an older SDK, or offline) scores the hand meld-free, which is
+        the conversion the offline numbers were measured with.
+        """
+        fields = getattr(state, "combinations", None)
+        if not fields or state.trump is None:
+            return (0, 0), False, None
+        c = combo.team_points(fields, ASCII_TO_ID)
+        q, k = state.trump * 8 + QUEEN, state.trump * 8 + KING
+        gone = set(state.graveyard) | {card for _, card in state.current_trick}
+        hidden = (combo.bela_declared(fields) is None
+                  and q not in gone and k not in gone)
+        return c, hidden, (q, k)
+
+    @staticmethod
+    def _world_c(c, hidden, pair, hands):
+        """The combination points to score ONE sampled world with: the public
+        total, plus bela to whichever seat holds both trump Q and K in this world
+        while that is still unknown. Our own hand is fixed across worlds, so a bela
+        we hold is counted in every one -- the SDK declares it when we play."""
+        if not hidden:
+            return c
+        q, k = pair
+        for seat, hand in enumerate(hands):
+            if q in hand and k in hand:
+                bela = combo.BELA_POINTS
+                return (c[0] + bela, c[1]) if seat % 2 == 0 else (c[0], c[1] + bela)
+        return c
 
 
 # ------------------------------------------------------------------ factories
