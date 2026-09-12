@@ -22,7 +22,8 @@ backUp/
 Documents/
 AUDIT_*.md
 FINDINGS*.md
-toDo.md
+toDo.txt
+research/
 agent-repo-handoff/
 
 # --- assistant / editor configuration -------------------------------------
