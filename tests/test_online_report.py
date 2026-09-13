@@ -131,6 +131,39 @@ def test_the_seat_comes_from_play_not_from_the_first_frame(tmp_path):
     assert [h["diff"] for h in hands] == [16.0, 16.0, 16.0]
 
 
+def _table_frame(phase, table, rnd, bot_seats=()):
+    """Us at seat 0 (seat 2 is our partner). `bot_seats` are played by belot.md's bot."""
+    players = [{"id": f"p{i}", "position": i, "bot": i in bot_seats} for i in range(4)]
+    players[0] = {"id": PID, "position": 0, "bot": False}
+    return {"pid": PID, "state": {"currentPhase": phase, "round": rnd,
+                                  "players": players, "scoreTable": json.dumps(table)}}
+
+
+def test_each_hand_is_tagged_with_the_bot_seats_played_during_it(tmp_path):
+    """Hand 2 had a bot opponent, hand 3 a bot partner; hand 1 was all human.
+    The tag follows the hand being played when its row landed, and the bot that
+    was still seated in the lobby before hand 1 does not count."""
+    frames = [_table_frame(2, [], 1, bot_seats=(1,)),        # deal: not counted
+              _table_frame(10, [], 1),
+              _table_frame(13, TABLE[:1], 1),
+              _table_frame(10, TABLE[:1], 2, bot_seats=(3,)),
+              _table_frame(13, TABLE[:2], 2),
+              _table_frame(10, TABLE[:2], 3, bot_seats=(2,)),
+              _table_frame(14, TABLE, 3)]
+    hands, _ = online_report.analyse(_recording(tmp_path, frames))
+    assert [h["bots"] for h in hands] == [[], ["opponent"], ["partner"]]
+    assert [h["diff"] for h in hands] == [16.0, 16.0, 16.0]
+
+
+def test_a_hand_already_on_the_table_when_recording_began_is_unobserved(tmp_path):
+    frames = [_table_frame(10, TABLE[:1], 2),                 # joined after hand 1
+              _table_frame(13, TABLE[:2], 2, bot_seats=(1,)),
+              _table_frame(10, TABLE[:2], 3),
+              _table_frame(14, TABLE, 3)]
+    hands, _ = online_report.analyse(_recording(tmp_path, frames))
+    assert [h["bots"] for h in hands] == [None, [], []]
+
+
 def test_a_seat_held_throughout_is_unaffected(tmp_path):
     """The control: with no rotation the answer must not move."""
     frames = [_frame(1, 0, []), _frame(1, 6, TABLE[:1]),

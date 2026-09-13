@@ -8,12 +8,12 @@ READ THE POWER LINE BEFORE THE RESULT. Offline, strength is measured on swap-pai
 deals: each deal played twice with the seat pairs exchanged, so card luck cancels and
 identical policies return exactly zero. **None of that is available online.** A deal
 cannot be replayed, so the instrument here is the raw per-hand mean, whose standard
-deviation is about 10.9 game points -- roughly twenty times the effect being looked
-for. Hands needed:
+deviation is about 13.6 game points (1,098 hands) -- dozens of times the effect being
+looked for. All-human hands needed:
 
-    +-1.0 pts/hand     ~460
-    +-0.5 pts/hand   ~1,830
-    +-0.25 pts/hand  ~7,300
+    +-1.0 pts/hand     ~710
+    +-0.5 pts/hand   ~2,850
+    +-0.25 pts/hand  ~11,400
 
 At the rate humans play, +-0.5 is several nights. The report prints the interval next
 to those targets so it is obvious when a number is still noise, which for a long while
@@ -29,6 +29,10 @@ table, all of them observed in real captures:
     happened.
   * once belot.md flags our seat as bot-controlled, the cards played at our seat are
     the platform bot's. Those hands measure the platform, not us, and are excluded.
+  * a hand with belot.md's bot in ANOTHER seat is not a hand against humans. The
+    platform replaces a player whose turn times out and often gives the seat back a
+    few hands later; ~15% of recorded hands had one. Every hand is tagged, and the
+    "vs humans" figure is computed on the hands where all four seats were human.
 
 AND THE ONE THAT ACTUALLY BIT. **Our seat is not fixed for a recording.** Before a match
 starts the host may rotate players around the table to set up teams (close code 4005);
@@ -57,6 +61,11 @@ SESSION_DIR = "sessions"
 # lobby, where the host can still rotate seats -- so they are exactly the frames a
 # seat must NOT be read from.
 MATCH_PHASE = 6                                    # protocol.TRUMP_CHOOSE_1
+PLAY_PHASE = 10                                    # protocol: play a card
+# Bidding (6-7), the seven-swap (8), the second deal (9), play (10) and the
+# completed trick on display (11). A bot flag on an end-phase frame is someone
+# timing out on the ready button, not during the hand.
+TRICK_SHOWN_PHASE = 11
 
 # The SDK's own frame parsing. Reused rather than reimplemented: `split_sessions`
 # encodes a hard-won lesson about which key does NOT delimit a match, and a second
@@ -156,10 +165,16 @@ def per_hand(table):
     carried forward unchanged. A row identical to its predecessor is a cancelled deal
     and is dropped rather than counted as a scoreless hand.
     """
+    return [hand for _, hand in _scored_rows(table)]
+
+
+def _scored_rows(table):
+    """`per_hand`, keeping each hand's row index in the table so it can be matched
+    to what happened at the table while that hand was played."""
     out = []
     prev = [0.0, 0.0]
     prev_row = None
-    for row in table:
+    for i, row in enumerate(table):
         if not isinstance(row, list) or len(row) < 2:
             continue
         if prev_row is not None and row == prev_row:
@@ -175,9 +190,51 @@ def per_hand(table):
                 cur.append(float(cell))
             else:
                 cur.append(prev[t])
-        out.append((cur[0] - prev[0], cur[1] - prev[1], bolted[0], bolted[1]))
+        out.append((i, (cur[0] - prev[0], cur[1] - prev[1], bolted[0], bolted[1])))
         prev, prev_row = cur, row
     return out
+
+
+def bot_tags(span):
+    """Which OTHER seats belot.md's bot played during each scored row of a span.
+
+    Returns {row index: sorted list of "partner" / "opponent"}, empty when all four
+    seats were human. A row already on the table when the recording began has no
+    entry -- we never saw that hand.
+
+    A row is attributed to the most recent hand (`round`) we saw being played when
+    the table grew. The flag is read on bidding and play frames only, and our own
+    seat is excluded: a takeover of OUR seat is handled by truncation instead.
+    """
+    by_round = collections.defaultdict(set)
+    last_play = None
+    prev_len = None
+    tags = {}
+    for r in span:
+        st = r.get("state") or {}
+        players = st.get("players") or []
+        phase = st.get("currentPhase", 0) or 0
+        rnd = st.get("round")
+        pid = r.get("pid")
+        me = next((i for i, p in enumerate(players)
+                   if pid is not None and str(p.get("id")) == str(pid)), None)
+        if me is not None and MATCH_PHASE <= phase <= TRICK_SHOWN_PHASE:
+            for s, p in enumerate(players):
+                if s != me and p.get("bot"):
+                    by_round[rnd].add("partner" if s % 2 == me % 2 else "opponent")
+            if phase == PLAY_PHASE:
+                last_play = rnd
+        raw = st.get("scoreTable")
+        table = jparse(raw, []) if raw not in (None, "") else []
+        n = len(table) if isinstance(table, list) else 0
+        if prev_len is None:
+            prev_len = n
+        elif n > prev_len:
+            hand = last_play if last_play is not None else rnd
+            for i in range(prev_len, n):
+                tags[i] = sorted(by_round.get(hand, ()))
+            prev_len = n
+    return tags
 
 
 def reconcile(table, rows):
@@ -221,9 +278,11 @@ def analyse(path):
     seats, problems = set(), []
     for span in split_sessions(recs):
         table = final_table(span)
-        rows = per_hand(table)
-        if not rows:
+        scored = _scored_rows(table)
+        if not scored:
             continue
+        rows = [hand for _, hand in scored]
+        tags = bot_tags(span)
         matches += 1
         # Per span, not per file: a recording can hold several matches, and the
         # host reseats between them.
@@ -231,12 +290,14 @@ def analyse(path):
         seats.add(seat)
         problems += reconcile(table, rows)
         team = (seat % 2) if seat is not None else 0
-        for d0, d1, b0, b1 in rows:
+        for i, (d0, d1, b0, b1) in scored:
             ours, theirs = (d0, d1) if team == 0 else (d1, d0)
             bolt_us = b0 if team == 0 else b1
             bolt_them = b1 if team == 0 else b0
             hands.append({"diff": ours - theirs, "us": ours, "them": theirs,
-                          "bolt_us": bolt_us, "bolt_them": bolt_them})
+                          "bolt_us": bolt_us, "bolt_them": bolt_them,
+                          # None: the hand predates the recording, so unobserved
+                          "bots": tags.get(i)})
 
     meta = {"file": os.path.basename(path), "seat": sorted(s for s in seats
                                                            if s is not None),
@@ -259,7 +320,7 @@ def decision_mix():
         return None
     keys = ("network", "searched", "fallback", "degraded", "infeasible",
             "solve_errors", "worlds", "melded", "hands_dealt", "tables",
-            "seat_losses")
+            "seat_losses", "bot_hands", "bot_partner_hands", "bot_opponent_hands")
     tot = {k: 0 for k in keys}
     sessions = 0
     worst = 0.0
@@ -323,22 +384,46 @@ def main():
         print("\n  no scored hands yet")
         return 0
 
-    diffs = [h["diff"] for h in all_hands]
+    # The "vs humans" figure is computed where all four seats were human. A hand
+    # with belot.md's bot in another seat measures something else, and mixing them
+    # in flattered the recorded number.
+    human = [h for h in all_hands if h.get("bots") == []]
+    headline = human or all_hands
+    diffs = [h["diff"] for h in headline]
     n = len(diffs)
     mean = sum(diffs) / n
     half = ci95(diffs)
     wins = sum(1 for d in diffs if d > 0)
     ties = sum(1 for d in diffs if d == 0)
 
-    print(f"\n-- strength --")
+    print(f"\n-- strength vs humans "
+          f"{'(all four seats human)' if human else '(NO hand was observed all-human)'} --")
     print(f"  pts/hand            {mean:+.3f} +- {half:.3f}   (n={n})")
     print(f"  hand win rate       {100 * wins / n:.1f}%   "
           f"(ties {100 * ties / n:.1f}%)")
-    print(f"  bolted them         {100 * sum(h['bolt_them'] for h in all_hands) / n:.1f}%"
+    print(f"  bolted them         {100 * sum(h['bolt_them'] for h in headline) / n:.1f}%"
           f"    bolted ourselves  "
-          f"{100 * sum(h['bolt_us'] for h in all_hands) / n:.1f}%")
+          f"{100 * sum(h['bolt_us'] for h in headline) / n:.1f}%")
     sig = abs(mean) > half if half == half else False
     print(f"  {'SIGNIFICANT' if sig else 'NOT significant'} at this sample size")
+
+    print(f"\n-- who was at the table --")
+    split = [
+        ("all four seats human", human),
+        ("belot.md's bot in an opponent seat",
+         [h for h in all_hands if h.get("bots") and "opponent" in h["bots"]]),
+        ("belot.md's bot in our partner's seat",
+         [h for h in all_hands if h.get("bots") and "partner" in h["bots"]]),
+        ("not observed (already on the table when recording began)",
+         [h for h in all_hands if h.get("bots") is None]),
+        ("all scored hands", all_hands),
+    ]
+    for label, hs in split:
+        if not hs:
+            continue
+        d = [h["diff"] for h in hs]
+        print(f"  {label:<58s} n={len(d):5d} ({100 * len(d) / len(all_hands):5.1f}%)"
+              f"  {sum(d) / len(d):+.3f} +- {ci95(d):.3f}")
 
     print(f"\n-- how much more play is needed --")
     sd = math.sqrt(sum((d - mean) ** 2 for d in diffs) / max(n - 1, 1))
@@ -368,6 +453,11 @@ def main():
             print(f"  melds on the table  {mix['melded']:,} of {mix['searched']:,} searched "
                   f"decisions ({100 * mix['melded'] / mix['searched']:.1f}%) -- scored "
                   f"the platform's way (0 before the meld-aware agent)")
+        if mix["bot_hands"]:
+            print(f"  bot seats           {mix['bot_hands']:,} hands with belot.md's bot "
+                  f"in another seat (opponent {mix['bot_opponent_hands']:,}, "
+                  f"partner {mix['bot_partner_hands']:,}) -- logged since the "
+                  f"counter was added")
         print(f"  worst decision      {mix['worst_decision_s']:.2f}s "
               f"of a 25s budget")
         if mix["stops"]:

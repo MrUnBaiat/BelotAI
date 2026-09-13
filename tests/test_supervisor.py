@@ -331,6 +331,28 @@ def test_a_stretch_that_is_stopped_still_writes_its_row(tmp_path, monkeypatch):
     assert row["hands_dealt"] == 7 and row["tables"] == 2
     assert row["error"] is None
     assert row["started"] <= row["ended"]
+    assert row["bot_hands"] == 0 and row["bot_partner_hands"] == 0
+
+
+def test_hands_with_a_bot_seat_are_counted_once_by_relation():
+    """Seat 1 is an opponent and seat 2 our partner (we sit at 0). A hand counts
+    once however many frames show the bot, and deal/lobby frames do not count."""
+    state = types.SimpleNamespace(bot_seats=[False, True, False, False])
+    sync = types.SimpleNamespace(my_pos=0, hand_id=1, state=state)
+    fake = types.SimpleNamespace(sync_engine=sync,
+                                 bot_hands={"partner": set(), "opponent": set()})
+    note = P.SupervisedBot._note_bot_seats
+
+    note(fake, {"currentPhase": 10})
+    sync.hand_id, state.bot_seats = 2, [False, True, True, False]
+    note(fake, {"currentPhase": 10})
+    note(fake, {"currentPhase": 11})
+    sync.hand_id = 3
+    note(fake, {"currentPhase": 2})                  # the deal: not counted
+    note(fake, {"currentPhase": 13})                 # hand over: not counted
+    sync.hand_id, state.bot_seats = 4, [True, True, True, True]
+    note(fake, {"currentPhase": 10})                 # our own seat is never counted
+    assert fake.bot_hands == {"opponent": {1, 2, 4}, "partner": {2, 4}}
 
 
 def test_a_stretch_that_raises_still_writes_its_row(tmp_path, monkeypatch):

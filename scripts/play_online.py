@@ -126,10 +126,29 @@ class SupervisedBot(LiveBelotBot):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.frames_seen = 0
+        # Hands in which belot.md's bot played another seat at some point during
+        # bidding or play, by relation. The platform replaces a human whose turn
+        # times out and often gives the seat back later; ~15% of recorded hands
+        # had one, and those are not hands against humans.
+        self.bot_hands = {"partner": set(), "opponent": set()}
 
     async def on_state_update(self, raw_state, my_player_id):
         self.frames_seen += 1
         await super().on_state_update(raw_state, my_player_id)
+        self._note_bot_seats(raw_state)
+
+    def _note_bot_seats(self, raw_state):
+        sync = self.sync_engine
+        me = sync.my_pos
+        bots = getattr(sync.state, "bot_seats", None)
+        # Bidding through the completed-trick display (phases 6-11); an end-phase
+        # flag is someone timing out on the ready button, not during the hand.
+        if me is None or not bots or not 6 <= (raw_state.get("currentPhase") or 0) <= 11:
+            return
+        for s, is_bot in enumerate(bots):
+            if is_bot and s != me:
+                rel = "partner" if s % 2 == me % 2 else "opponent"
+                self.bot_hands[rel].add(sync.hand_id)
 
 
 def _stamp():
@@ -254,6 +273,8 @@ async def one_session(agent, args):
             _say(f"session raised: {error}")
 
         dur = time.monotonic() - started
+        bot_hands = getattr(bot, "bot_hands", None) or {"partner": set(),
+                                                        "opponent": set()}
         row = {
             "started": started_at,
             "ended": _now(),
@@ -264,6 +285,9 @@ async def one_session(agent, args):
             "tables": bot.client.sessions_played,
             "agent_resets": agent.agent_resets,
             "seat_losses": losses,
+            "bot_hands": len(bot_hands["partner"] | bot_hands["opponent"]),
+            "bot_partner_hands": len(bot_hands["partner"]),
+            "bot_opponent_hands": len(bot_hands["opponent"]),
             "stopped_for_idle": idle,
             "stop_reason": reason,
             "max_decision_s": round(agent.max_decision_s, 3),
@@ -276,7 +300,8 @@ async def one_session(agent, args):
              f"{row['tables']} table(s), {row['hands_dealt']} hands dealt, "
              f"{agent.stats['network']} network / {agent.stats['searched']} searched"
              f" / {agent.stats['fallback']} fallback, "
-             f"worst decision {agent.max_decision_s:.2f}s"
+             f"worst decision {agent.max_decision_s:.2f}s, "
+             f"{row['bot_hands']} hand(s) with belot.md's bot in another seat"
              + (f"   SEAT LOST x{losses}" if losses else ""))
         if agent.stats["solve_errors"]:
             _say(f"WARNING: {agent.stats['solve_errors']} solver faults this "
