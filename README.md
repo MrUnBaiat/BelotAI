@@ -1,28 +1,46 @@
 # Belot: a Recurrent MAPPO agent, and the search that beats it
 
-An imperfect-information card-game agent for **Belot** — 32 cards, four players, two
-fixed partnerships — built in two halves that turned out to matter very differently:
+**Belot** is a 32-card, four-player partnership card game — the same family as Belote
+and Klaverjas. You never see the other three hands, you cannot tell your partner
+anything, and a single hand swings on card luck far more than on skill: the part of
+the outcome a player actually *controls* is about **1.2% of its variance**. That makes
+it an unusually honest testbed, because almost anything you build looks like it works
+until you measure it properly.
 
-- a **Recurrent MAPPO** agent (PPO + LSTM, centralised critic) trained by self-play, and
-- an **exact double-dummy search** layered on top of it at play time.
+This repository trains an agent to play it — and then spends most of its effort
+finding out how much of what it does is real.
 
-The strongest player is the composite of the two:
+### It plays live against real people
 
-> **model bidding + model card play at tricks 0–2 + exact-solve PIMC (D=128) from trick 3**
->
-> **+1.270 ± 0.197 pts/hand** over the bare agent (n=1000)
-> **+0.435 ± 0.208 pts/hand** of that comes from D=128 over D=8, replicated on fresh deals
->
-> Identical-policy control exactly `0.000`.
+The agent runs unattended on **belot.md**, a commercial Belot site, over an
+undocumented WebSocket protocol I reverse-engineered into a
+[separate SDK](https://github.com/MrUnBaiat/belotmd). Across **1,098 scored hands** in
+30 sessions: **zero seats lost, zero solver faults, zero fallbacks.**
 
-A per-hand edge compounds over a match to 101 (~11.5 hands): +1.0 pts/hand is about a
-**62% match win rate**.
+```mermaid
+flowchart LR
+    S[hand starts] --> P{which decision?}
+    P -->|bidding| N["neural network<br/>(Recurrent MAPPO)"]
+    P -->|tricks 0-2| N
+    P -->|tricks 3-7| E["exact double-dummy search<br/>128 sampled worlds, solved exactly"]
+    N --> C[card played]
+    E --> C
+```
 
-The other half of the project is the part I would actually point at: the agent
-plateaued, and the repository contains the measurements that say **why**, what the
-ceiling is, and which of a dozen plausible fixes are ruled out — with confidence
-intervals, pre-registered reading rules, and negative results reported as results.
-See **[docs/RESULTS.md](docs/RESULTS.md)**.
+| | |
+|---|---|
+| strongest player | network bidding + network tricks 0–2 + exact search from trick 3 |
+| **vs. its own trained network** | **+1.270 ± 0.197 pts/hand** (n=1000) — roughly a **62% match win rate** |
+| vs. humans, live | +0.29 ± 0.87 pts/hand over the 938 hands where all four seats were human — not yet distinguishable from zero, and [here is why that needs ~2,900](#measuring-strength-against-humans-is-slow) |
+| correctness | 89 tests, 16 standalone verification tools, identical-policy control exactly `0.000` |
+
+### The half I would actually point at
+
+The agent **plateaued** after ~3,000 epochs. This repository contains the measurements
+that say **why**, what the ceiling is, and which of a dozen plausible fixes are ruled
+out — with confidence intervals, pre-registered reading rules, and negative results
+reported as results. Seven attempts to break the plateau are documented *with the
+evidence that killed them*. See **[docs/RESULTS.md](docs/RESULTS.md)**.
 
 ---
 
@@ -34,7 +52,7 @@ pip install -r requirements.txt
 python tools/check_env_rules.py          # game-rule invariants over 3,000 random games
 python tools/check_solver.py             # exact solver vs the engine at every state
 python tools/check_swap_control.py       # the evaluation instrument's control
-pytest -q                                # 55 tests
+pytest -q                                # 89 tests
 
 python scripts/play.py                   # play one hand, card by card
 python scripts/evaluate.py --n 500       # reproduce +1.270 ± 0.197  (~4.3 h, D=128)
@@ -77,7 +95,7 @@ belot/
   online/
     agent.py         the same player, adapted to a live belot.md table
 scripts/             train, play, evaluate, play_online
-tools/               15 correctness checks and measurement probes
+tools/               16 correctness checks and measurement probes
 tests/               pytest suite
 docs/                game rules, and the results
 ```
@@ -116,9 +134,10 @@ measured at **−0.348 ± 0.309** — significantly worse.
 **D = 128.** Worth **+0.435 ± 0.208** over D=8, swap-paired on identical deals and
 replicated on 500 deals no earlier run had touched (bootstrap `[+0.226, +0.645]`,
 sign test `p = 0.00007`). This corrects an earlier claim in this repository that the
-determinization axis was flat — it is flat near 8 and rises by 128. It is also free:
-a D=128 decision runs **0.52 s median, 7.94 s worst** against belot.md's 25 s turn
-clock. See [docs/RESULTS.md §3.1](docs/RESULTS.md).
+determinization axis was flat — it is flat near 8 and rises by 128. It is nearly free:
+a D=128 decision runs **0.20 s median** against belot.md's 25 s turn clock, though the
+tail reaches **23 s** at trick 3, where the belief is widest. See
+[docs/RESULTS.md §3.1](docs/RESULTS.md).
 
 ---
 
@@ -170,7 +189,7 @@ encoder, the same network and the same solver as the offline player — there is
 second copy of any of them to drift — and routes identically: bidding and tricks 0–2 to
 the network, tricks 3–7 to the exact search.
 
-**Three things are genuinely different online**, and each is handled rather than
+**Four things are genuinely different online**, and each is handled rather than
 assumed away:
 
 - **You cannot see the other hands.** The server publishes placeholders of the correct
@@ -183,20 +202,12 @@ assumed away:
   reported maximally, so the ranks just outside it are provably not held — about 3.7
   extra excluded cards per hand, validated at 143 exclusions and **zero** false voids
   against fully-known hands.
-- **The hand is scored differently.** belot.md bolts the declaring team on trick points
-  *plus* declared combinations, and pays 16 + all combinations/10 rather than a flat
-  16 — a rule read off 897 recorded hands and reproduced on every one of them. The
-  simulator has no melds, so the solver used to aim every world at a fixed line of 81;
-  the platform moves that line on two hands in three, by 25 or more points on one in
-  five. Online the search now converts every world with the combinations the server has
-  settled (public from trick 3, `state.combinations`) plus bela per world while it is
-  still hidden — `composite.gp_diff_platform` — and takes the old conversion, exactly,
-  when nothing is declared. Priced against the network on **2,000 paired deals across
-  three independent deal ranges: +0.174 ± 0.122 pts/hand**, and whenever it changes a late
-  card the new card is significantly better under the platform's own scoring. Every
-  offline number in this file was measured in the meld-free game, which flatters the old
-  conversion by about 0.2 pts/hand (`research/v10_search/FINDINGS.md` §13). The simulator
-  can now score the platform's game too: `BelotEnv.melds = True`.
+- **The hand is scored differently.** belot.md counts declared combinations in the bolt
+  threshold and in the stakes; the offline simulator has no concept of them, so the
+  search was aiming at a fixed line of 81 that the real game **moves on two hands in
+  three**. The rule was reconstructed from 897 recorded hands and reproduced on every
+  one; correcting the search is worth **+0.174 ± 0.122 pts/hand** over 2,000 paired
+  deals. See [docs/RESULTS.md](docs/RESULTS.md) §3.
 - **There is a clock, and overrunning costs the seat.** 25 s to play a card; miss it
   and belot.md hands the seat to its own bot for the rest of the session, after which
   every message is ignored while the log keeps printing the cards we chose. The search
@@ -217,30 +228,37 @@ all for two hours — because the SDK retries an empty lobby every five minutes
 forever, and an expired cookie looks exactly the same from outside it. Every stop
 waits for the end of the current hand.
 
-### What the first live sessions measured
+### What live play has measured
 
-13 sessions, 5,626 frames, **109 scored hands**, **zero seat takeovers**. Replaying
-the recordings through the SDK's own synchronizer reproduces 958 of the 959 decisions
-taken live, and the search fired on **239 of 239** searchable ones with no fallbacks,
-no infeasible constraint sets and no solver faults. The worst decision took 2.94 s,
-and the least clock ever remaining at a decision was 12.0 s.
+32 recordings, 119 matches, **1,098 scored hands** across 30 sessions. Of 9,144
+decisions (29.7% of them searched): **zero seats lost, zero solver faults, zero
+fallbacks, zero infeasible constraint sets.** The worst single decision took 23.3 s of
+the 25 s turn clock — inside the deadline guard's margin, which exists because
+overrunning is the one failure that would cost the seat.
 
-Strength so far is **−1.29 ± 2.49 pts/hand (n=109)** — an interval twenty times wider
-than the effect, which is what the table above predicts at this sample size. After
-912 scored hands it stands at **+0.46 ± 0.88**, still not distinguishable from zero.
-Throughput is about 42 hands/hour, so ±0.5 is roughly 45 more hours of play.
+**One hand in seven was not against four humans.** belot.md replaces a player whose
+turn times out with its own bot, and often hands the seat back a few hands later; 160
+of the 1,098 hands had that bot in another seat (113 opponent, 61 partner). The
+recordings carry only a per-frame flag for it, so `tools/online_report.py` tags every
+hand and quotes strength on the rest.
+
+Strength against humans is **+0.29 ± 0.87 pts/hand (n=938, all four seats human)** —
+still not distinguishable from zero, which is exactly what the table below predicts at
+this sample size. Across all 1,098 hands it is +0.44 ± 0.80; with a bot opponent it was
++1.89 ± 2.24, the direction that made mixing them flattering. Throughput is about 42
+hands/hour, so ±0.5 needs roughly 50 more hours.
 
 ### Measuring strength against humans is slow
 
 There is no swap-paired control online: a deal cannot be replayed with the seats
 exchanged. The instrument is the raw per-hand mean, whose standard deviation is about
-10.9 game points — roughly twenty times the effect being looked for:
+13.6 game points — dozens of times the effect being looked for:
 
-| target interval | hands needed |
+| target interval | all-human hands needed |
 |---|---|
-| ±1.0 pts/hand | ~460 |
-| ±0.5 pts/hand | ~1,830 |
-| ±0.25 pts/hand | ~7,300 |
+| ±1.0 pts/hand | ~710 |
+| ±0.5 pts/hand | ~2,850 |
+| ±0.25 pts/hand | ~11,400 |
 
 `tools/online_report.py` prints the current interval beside those targets, so it is
 obvious when a number is still noise.
