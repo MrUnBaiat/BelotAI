@@ -67,16 +67,11 @@ PLAY_PHASE = 10                                    # protocol: play a card
 # timing out on the ready button, not during the hand.
 TRICK_SHOWN_PHASE = 11
 
-# The SDK's own frame parsing. Reused rather than reimplemented: `split_sessions`
-# encodes a hard-won lesson about which key does NOT delimit a match, and a second
-# implementation of it would be a second place to get that wrong.
-try:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__)))), "BelotMDPlayer", "tools"))
-    from frame_inspector import bolt_marker, jparse, load, split_sessions
-except ImportError:                                            # pragma: no cover
-    sys.exit("could not import the SDK's frame_inspector; point PYTHONPATH at "
-             "belotmd's tools/ directory")
+# Recording parsing, kept beside this file (copied from the SDK's frame_inspector,
+# which is not part of its installable package). `split_sessions` encodes a
+# hard-won lesson about which key does NOT delimit a match.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from frame_io import bolt_marker, jparse, load, split_sessions  # noqa: E402
 
 
 def ci95(xs):

@@ -26,10 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 
-# `online_report` puts the SDK's tools/ on the path itself, so import it first and
-# skip only if that machinery is genuinely absent.
-online_report = pytest.importorskip(
-    "online_report", reason="needs the belotmd SDK's frame_inspector")
+import online_report                                   # noqa: E402
+
 ci95, per_hand = online_report.ci95, online_report.per_hand
 
 # A real captured match. Row 7 duplicates row 6: a cancelled deal.
