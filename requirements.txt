@@ -10,8 +10,9 @@ tensorboard>=2.12
 pytest>=7.0
 
 # The belot.md SDK, used by the online layer (belot/online, scripts/play_online.py,
-# tools/verify_online.py) and its tests. Installed straight from GitHub and pinned to
+# tools/verify_online.py) and its tests. The `live` extra is the websockets client the
+# SDK needs to reach belot.md. Installed straight from GitHub and pinned to
 # a commit, so a change to the SDK cannot silently change this project; update the
 # commit when you update the SDK. To work on both repositories at once, run
 # `pip install -e ../BelotMDPlayer` after installing this file.
-belotmd @ git+https://github.com/MrUnBaiat/belotmd.git@01e81fbbc67d7be13db46d0bb1c5430a3c63c983
+belotmd[live] @ git+https://github.com/MrUnBaiat/belotmd.git@01e81fbbc67d7be13db46d0bb1c5430a3c63c983
