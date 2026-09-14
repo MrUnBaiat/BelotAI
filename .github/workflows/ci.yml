@@ -1,0 +1,26 @@
+name: CI
+
+# Every push: any branch, any tag.
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          # CPU-only PyTorch: the default CUDA build is several GB and the tests
+          # need no GPU. requirements.txt then installs everything else, the
+          # belotmd SDK included.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Test
+        run: pytest -q

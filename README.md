@@ -1,5 +1,7 @@
 # Belot: a Recurrent MAPPO agent, and the search that beats it
 
+[![CI](https://github.com/MrUnBaiat/BelotAI/actions/workflows/ci.yml/badge.svg)](https://github.com/MrUnBaiat/BelotAI/actions/workflows/ci.yml)
+
 **Belot** is a 32-card, four-player partnership card game — the same family as Belote
 and Klaverjas. You never see the other three hands, you cannot tell your partner
 anything, and a single hand swings on card luck far more than on skill: the part of
@@ -32,7 +34,7 @@ flowchart LR
 | strongest player | network bidding + network tricks 0–2 + exact search from trick 3 |
 | **vs. its own trained network** | **+1.270 ± 0.197 pts/hand** (n=1000) — roughly a **62% match win rate** |
 | vs. humans, live | +0.29 ± 0.87 pts/hand over the 938 hands where all four seats were human — not yet distinguishable from zero, and [here is why that needs ~2,900](#measuring-strength-against-humans-is-slow) |
-| correctness | 89 tests, 16 standalone verification tools, identical-policy control exactly `0.000` |
+| correctness | 92 tests and 16 standalone verification tools, run in CI; identical-policy control exactly `0.000` |
 
 ### The half I would actually point at
 
@@ -52,7 +54,7 @@ pip install -r requirements.txt
 python tools/check_env_rules.py          # game-rule invariants over 3,000 random games
 python tools/check_solver.py             # exact solver vs the engine at every state
 python tools/check_swap_control.py       # the evaluation instrument's control
-pytest -q                                # 89 tests
+pytest -q                                # 92 tests
 
 python scripts/play.py                   # play one hand, card by card
 python scripts/evaluate.py --n 500       # reproduce +1.270 ± 0.197  (~4.3 h, D=128)
@@ -98,6 +100,7 @@ scripts/             train, play, evaluate, play_online
 tools/               16 correctness checks and measurement probes
 tests/               pytest suite
 docs/                game rules, and the results
+.github/workflows/   CI: the test suite on every push
 ```
 
 ---
@@ -269,7 +272,8 @@ account ids.
 ## Requirements
 
 Python 3.10+, PyTorch, NumPy. `pytest` for the tests, `tensorboard` for training
-curves. See `requirements.txt`.
+curves, and the [belotmd SDK](https://github.com/MrUnBaiat/belotmd) for live play —
+installed from GitHub, pinned to a commit. See `requirements.txt`.
 
 ## License
 
