@@ -123,7 +123,7 @@ class SupervisedBot(LiveBelotBot):
     waiting on an empty lobby or shouting into a closed session.
     """
 
-    def __init__(self, *a, **kw):
+    def __init__(self, *a, partner=None, **kw):
         super().__init__(*a, **kw)
         self.frames_seen = 0
         # Hands in which belot.md's bot played another seat at some point during
@@ -131,11 +131,36 @@ class SupervisedBot(LiveBelotBot):
         # times out and often gives the seat back later; ~15% of recorded hands
         # had one, and those are not hands against humans.
         self.bot_hands = {"partner": set(), "opponent": set()}
+        # Our other account's username, when we are playing as a pair. Hands it
+        # partnered us for are the whole point of the exercise and have to be
+        # countable separately from hands with a stranger as partner.
+        self.partner = (partner or "").strip().casefold() or None
+        self.partner_hands = set()
 
     async def on_state_update(self, raw_state, my_player_id):
         self.frames_seen += 1
         await super().on_state_update(raw_state, my_player_id)
         self._note_bot_seats(raw_state)
+        self._note_partner(raw_state)
+
+    def _note_partner(self, raw_state):
+        """Record the hands our own second account sat opposite us for.
+
+        Only the boolean outcome is ever written down: the seat's name is
+        compared here and goes no further.
+        """
+        sync = self.sync_engine
+        me = sync.my_pos
+        if self.partner is None or me is None:
+            return
+        if not 6 <= (raw_state.get("currentPhase") or 0) <= 11:
+            return
+        players = raw_state.get("players") or []
+        seat = (me + 2) % 4
+        if seat < len(players):
+            name = (players[seat].get("name") or "").strip().casefold()
+            if name == self.partner:
+                self.partner_hands.add(sync.hand_id)
 
     def _note_bot_seats(self, raw_state):
         sync = self.sync_engine
@@ -152,7 +177,10 @@ class SupervisedBot(LiveBelotBot):
 
 
 def _stamp():
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    # Milliseconds, not seconds: two accounts started together used to land on
+    # the same recording name, and the SDK opens it in append mode -- so both
+    # players' hands, each one private to its own bot, went into one file.
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
 
 def _now():
@@ -235,14 +263,24 @@ async def one_session(agent, args):
     Ctrl-C, or because the account can no longer play at all.
     """
     os.makedirs(SESSION_DIR, exist_ok=True)
-    frames = os.path.join(SESSION_DIR, f"frames_{_stamp()}.jsonl")
+    tag = f"_{args.account}" if args.account else ""
+    frames = os.path.join(SESSION_DIR, f"frames_{_stamp()}{tag}.jsonl")
     agent.begin_session()
 
     # `--once` is the SDK's own flag: it makes `run()` return when the table
     # dissolves instead of finding another. Without passing it through, --once
     # would gate this loop while the SDK played on forever underneath it.
-    cfg = Config.from_env(frames_path=frames, reconnect=not args.once)
-    bot = SupervisedBot(cfg, agent=agent)
+    #
+    # `env_file` is what makes a pair safe: each process takes its credentials
+    # from its own file and from nowhere else, so neither the other account's
+    # file nor a stray BELOT_COOKIES in the shell can decide who this is.
+    cfg = Config.from_env(env_file=args.env,
+                          frames_path=frames,
+                          reconnect=not args.once,
+                          table_mode=args.table,
+                          table_id=args.table_id or None,
+                          table_creator=args.table_creator or None)
+    bot = SupervisedBot(cfg, agent=agent, partner=args.partner)
 
     started_at, started = _now(), time.monotonic()
     deadline = started + args.hours * 3600
@@ -279,6 +317,9 @@ async def one_session(agent, args):
             "started": started_at,
             "ended": _now(),
             "seconds": round(dur, 1),
+            "account": args.account or None,
+            "role": args.table,
+            "partner_hands": len(getattr(bot, "partner_hands", ())),
             "frames": frames,
             "frames_seen": bot.frames_seen,
             "hands_dealt": bot.sync_engine.hand_id,
@@ -428,7 +469,37 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="build the agent and print the plan, without connecting")
     ap.add_argument("--seed", type=int, default=None)
+
+    # --- playing as a pair -------------------------------------------------
+    ap.add_argument("--account", default=None,
+                    help="a label for this account, used in the recording "
+                         "filename and the session log. Required when two run "
+                         "at once, so their recordings never share a name")
+    ap.add_argument("--env", default=None,
+                    help="credentials file for THIS account (e.g. .env.alpha). "
+                         "Its BELOT_COOKIES is the only one consulted, so a "
+                         "second account cannot inherit the first's login")
+    ap.add_argument("--table", choices=("lobby", "create", "join"),
+                    default="lobby",
+                    help="lobby: the first open public table (default). "
+                         "create: make a table and wait in it. join: sit at "
+                         "the table --table-creator made")
+    ap.add_argument("--table-creator", default=None,
+                    help="with --table join: the username of our other "
+                         "account, whose table we are looking for")
+    ap.add_argument("--table-id", default=None,
+                    help="with --table join: a specific table id instead "
+                         "(a string, prefix included)")
+    ap.add_argument("--partner", default=None,
+                    help="our other account's username. Only used to count "
+                         "the hands it partnered us for; nothing about the "
+                         "other players is recorded")
     args = ap.parse_args()
+
+    if args.table == "join" and not (args.table_creator or args.table_id):
+        sys.exit("--table join needs --table-creator (or --table-id): "
+                 "otherwise there is nothing to tell our partner's table from "
+                 "a stranger's.")
 
     if not os.path.exists(args.ckpt):
         sys.exit(f"checkpoint not found: {args.ckpt}\n"
@@ -450,13 +521,21 @@ def main():
          f"{args.max_idle_min:g} min with no frames")
     _say(f"frames -> {SESSION_DIR}/frames_<utc>.jsonl, one file per stretch")
 
-    # Credentials resolve from the SDK's own project root, not the working
-    # directory, so this runs the same from anywhere. Printed because "which
-    # account is this playing as" should never be a mystery mid-session.
+    # Credentials resolve from --env if given, otherwise from the SDK's own
+    # project root rather than the working directory, so this runs the same
+    # from anywhere. Printed because "which account is this playing as" should
+    # never be a mystery mid-session.
     from belotmd.config import ENV_FILE
-    cfg = Config.from_env()
-    _say(f"credentials: {ENV_FILE} "
+    cfg = Config.from_env(env_file=args.env)
+    _say(f"credentials: {args.env or ENV_FILE} "
          f"({'loaded' if cfg.cookies else 'MISSING -- set BELOT_COOKIES'})")
+    if args.account:
+        _say(f"account: {args.account}")
+    _say("table: " + {
+        "lobby": "the first open public table",
+        "create": "creating one and waiting in it",
+        "join": f"joining {args.table_creator or args.table_id}'s table",
+    }[args.table])
     _say(f"reconnection is the SDK's: empty lobby -> retry in "
          f"{cfg.retry_delay_s:.0f}s, table dissolved -> new table in "
          f"{cfg.rejoin_delay_s:.0f}s")

@@ -34,7 +34,11 @@ from scripts.play_online import supervise
 
 def _args(**kw):
     base = dict(hours=10.0, break_min=0.0, max_seat_losses=3, max_short=5,
-                max_idle_min=60.0, max_sessions=0, once=False)
+                max_idle_min=60.0, max_sessions=0, once=False,
+                # Playing as a pair. The defaults are the single-account run:
+                # no label, the SDK's own credentials file, the lobby pick.
+                account=None, env=None, table="lobby", table_creator=None,
+                table_id=None, partner=None)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -275,8 +279,9 @@ class StubBot:
     """Stands in for LiveBelotBot: runs until cancelled, or raises."""
     raises = None
 
-    def __init__(self, cfg, agent=None):
-        self.cfg, self.agent = cfg, agent
+    def __init__(self, cfg, agent=None, partner=None):
+        self.cfg, self.agent, self.partner = cfg, agent, partner
+        self.partner_hands = set()
         self.frames_seen = 0
         self.seat_bot_controlled = False
         self.sync_engine = types.SimpleNamespace(hand_id=7)
@@ -332,6 +337,116 @@ def test_a_stretch_that_is_stopped_still_writes_its_row(tmp_path, monkeypatch):
     assert row["error"] is None
     assert row["started"] <= row["ended"]
     assert row["bot_hands"] == 0 and row["bot_partner_hands"] == 0
+
+
+# ------------------------------------------------------- two accounts at once
+#
+# Two of our accounts play the same table as partners, in two processes. Neither
+# may end up reading the other's credentials or writing into its recording --
+# a recording holds one player's hand, and every tool that reads one assumes so.
+
+def test_each_account_records_to_its_own_file(tmp_path, monkeypatch):
+    """THE BUG: the stamp was per second, so two accounts started together
+    produced the same filename -- and the recorder appended to it."""
+    monkeypatch.setattr(P, "_stamp", lambda: "20260916_120000_000")
+
+    row_a, _, _ = _one_session(tmp_path, monkeypatch, account="alpha")
+    row_b, _, _ = _one_session(tmp_path, monkeypatch, account="beta")
+
+    assert row_a["frames"] != row_b["frames"], (
+        "same second, same file -- both accounts' hands in one recording")
+    assert row_a["frames"].endswith("_alpha.jsonl")
+    assert row_b["frames"].endswith("_beta.jsonl")
+
+
+def test_a_single_account_run_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "_stamp", lambda: "20260916_120000_000")
+    row, _, cfg = _one_session(tmp_path, monkeypatch)
+    assert row["frames"].endswith("frames_20260916_120000_000.jsonl")
+    assert cfg["env_file"] is None and cfg["table_mode"] == "lobby"
+    assert row["account"] is None and row["role"] == "lobby"
+
+
+def test_each_account_takes_its_credentials_from_its_own_file(tmp_path, monkeypatch):
+    _, _, cfg = _one_session(tmp_path, monkeypatch, account="alpha",
+                             env=".env.alpha")
+    assert cfg["env_file"] == ".env.alpha", (
+        "without this the shell's BELOT_COOKIES decides who plays")
+
+
+def test_the_host_and_the_guest_ask_for_different_tables(tmp_path, monkeypatch):
+    _, _, host = _one_session(tmp_path, monkeypatch, table="create")
+    _, _, guest = _one_session(tmp_path, monkeypatch, table="join",
+                               table_creator="MyOtherAccount")
+
+    assert host["table_mode"] == "create"
+    assert guest["table_mode"] == "join"
+    assert guest["table_creator"] == "MyOtherAccount"
+
+
+def test_the_row_says_which_account_and_role_it_was(tmp_path, monkeypatch):
+    row, logged, _ = _one_session(tmp_path, monkeypatch, account="alpha",
+                                  table="create")
+    assert row["account"] == "alpha" and row["role"] == "create"
+    assert row["partner_hands"] == 0
+    assert logged == [row]
+
+
+def _partner_bot(partner="MyOtherAccount", my_pos=0):
+    sync = types.SimpleNamespace(my_pos=my_pos, hand_id=1)
+    return types.SimpleNamespace(sync_engine=sync,
+                                 partner=partner.casefold() if partner else None,
+                                 partner_hands=set())
+
+
+def _seats(names):
+    return {"currentPhase": 10,
+            "players": [{"id": str(i), "name": n} for i, n in enumerate(names)]}
+
+
+def test_hands_our_own_account_partnered_us_for_are_counted():
+    """These are the hands the pair exists to produce, so they have to be
+    countable apart from hands with a stranger as partner."""
+    fake = _partner_bot()
+    note = P.SupervisedBot._note_partner
+
+    note(fake, _seats(["us", "human", "MyOtherAccount", "human"]))
+    assert fake.partner_hands == {1}
+
+    # The same hand seen again does not count twice.
+    note(fake, _seats(["us", "human", "MyOtherAccount", "human"]))
+    assert fake.partner_hands == {1}
+
+
+def test_a_stranger_in_the_partner_seat_is_not_us():
+    fake = _partner_bot()
+    P.SupervisedBot._note_partner(
+        fake, _seats(["us", "human", "SomeoneElse", "human"]))
+    assert fake.partner_hands == set()
+
+
+def test_our_account_in_an_opponent_seat_is_not_a_partner_hand():
+    """Sitting at the same table is not the point; sitting OPPOSITE is."""
+    fake = _partner_bot()
+    P.SupervisedBot._note_partner(
+        fake, _seats(["us", "MyOtherAccount", "human", "human"]))
+    assert fake.partner_hands == set()
+
+
+def test_nothing_is_counted_outside_the_hand():
+    fake = _partner_bot()
+    note = P.SupervisedBot._note_partner
+    seats = _seats(["us", "human", "MyOtherAccount", "human"])
+    for phase in (0, 2, 13, 14):
+        note(fake, dict(seats, currentPhase=phase))
+    assert fake.partner_hands == set()
+
+
+def test_a_solo_run_counts_no_partner_hands():
+    fake = _partner_bot(partner=None)
+    P.SupervisedBot._note_partner(
+        fake, _seats(["us", "human", "whoever", "human"]))
+    assert fake.partner_hands == set()
 
 
 def test_hands_with_a_bot_seat_are_counted_once_by_relation():
