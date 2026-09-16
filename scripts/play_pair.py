@@ -70,7 +70,13 @@ def child_spec(role, account, env_file, partner_name, seed, stamp,
     if role not in ("host", "guest"):
         raise ValueError(f"role must be host or guest, not {role!r}")
 
-    argv = [sys.executable, PLAY_ONLINE,
+    # -u because the child's stdout is a FILE, not a terminal: Python then
+    # block-buffers it, and everything the SDK prints -- the room it joined,
+    # the seat map, every error -- sits in an 8 KB buffer for minutes. Only
+    # the supervisor's own lines use flush=True, so the logs looked alive
+    # while saying nothing, and the launcher's wait for the host to be seated
+    # could never match the line it was waiting for.
+    argv = [sys.executable, "-u", PLAY_ONLINE,
             "--account", account,
             "--env", env_file,
             "--table", "create" if role == "host" else "join",

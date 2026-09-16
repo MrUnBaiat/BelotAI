@@ -56,6 +56,16 @@ def test_each_child_is_told_who_its_partner_is():
     assert _opt(_guest()[0], "--partner") == HOST_NAME
 
 
+def test_children_run_unbuffered():
+    """THE BUG: a child's stdout is a FILE, so Python block-buffers it. Only
+    the supervisor's own lines use flush=True, so every SDK line -- the room
+    joined, the seat map, the errors -- sat invisible in an 8 KB buffer, and
+    the launcher's wait for the host to be seated could never match."""
+    argv, env, _ = _host()
+    assert "-u" in argv[:3], "the interpreter must be told not to buffer"
+    assert argv.index("-u") < argv.index(PP.PLAY_ONLINE)
+
+
 def test_each_child_reads_its_own_credentials_file():
     assert _opt(_host()[0], "--env") == ".env.alpha"
     assert _opt(_guest()[0], "--env") == ".env.beta"
