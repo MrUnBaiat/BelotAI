@@ -33,6 +33,10 @@ CLAUDE.md
 # --- live play: recordings and credentials --------------------------------
 # Frames carry other players' usernames and account ids; .env holds session
 # cookies for the account the bot plays as. Neither is ever published.
+# Playing as a pair means one credentials file per account (.env.alpha,
+# .env.beta), so the whole pattern is ignored -- the example file is not.
 frames*.jsonl
 sessions/
 .env
+.env.*
+!.env.example

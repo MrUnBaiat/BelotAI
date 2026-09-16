@@ -129,6 +129,101 @@ def test_the_seat_comes_from_play_not_from_the_first_frame(tmp_path):
     assert [h["diff"] for h in hands] == [16.0, 16.0, 16.0]
 
 
+# ------------------------------------------------- two accounts, one table
+#
+# When our two accounts play the same table as partners, each records the whole
+# match from its own seat. Counting both copies would double n and shrink every
+# interval by ~sqrt(2) for nothing -- they are one hand seen twice, perfectly
+# correlated, not two observations.
+
+STARTED = "2026-09-16T12:00:00"
+
+
+def _pair_frame(pid, seat, phase, table, started=STARTED):
+    """One frame as ONE of our accounts recorded it."""
+    players = [{"id": f"p{i}", "position": i, "bot": False} for i in range(4)]
+    players[seat] = {"id": pid, "position": seat, "bot": False}
+    return {"pid": pid,
+            "state": {"currentPhase": phase, "players": players,
+                      "gameStartTime": started,
+                      "scoreTable": json.dumps(table)}}
+
+
+def _account(tmp_path, pid, seat, name, started=STARTED):
+    """A whole recording of TABLE, from one account's seat."""
+    frames = [_pair_frame(pid, seat, 2, [], started)]
+    for i in range(1, len(TABLE) + 1):
+        frames.append(_pair_frame(pid, seat, 10, TABLE[:i], started))
+    frames.append(_pair_frame(pid, seat, 14, TABLE, started))
+    return online_report.analyse(_recording(tmp_path, frames, name))[0]
+
+
+def test_a_table_recorded_by_both_our_accounts_counts_once(tmp_path):
+    """THE BUG: three hands played became six hands reported, with an interval
+    tightened by a duplicate of itself."""
+    host = _account(tmp_path, "host-1", 0, "frames_host.jsonl")
+    guest = _account(tmp_path, "guest-1", 2, "frames_guest.jsonl")
+    assert len(host) == len(guest) == 3
+
+    kept, duplicated, opposed = online_report.dedupe(host + guest)
+
+    assert len(kept) == 3, "the same three hands, not six"
+    assert duplicated == 3 and opposed == 0
+    assert [h["diff"] for h in kept] == [16.0, 16.0, 16.0]
+
+
+def test_hands_our_own_partner_played_are_marked_as_such(tmp_path):
+    """A second copy existing IS the finding: it means our own account was the
+    one sitting opposite, which is the whole point of playing as a pair."""
+    host = _account(tmp_path, "host-1", 0, "frames_host.jsonl")
+    guest = _account(tmp_path, "guest-1", 2, "frames_guest.jsonl")
+
+    kept, _, _ = online_report.dedupe(host + guest)
+    assert all(h.get("paired") for h in kept)
+
+
+def test_a_lone_recording_is_not_a_paired_hand(tmp_path):
+    host = _account(tmp_path, "host-1", 0, "frames_host.jsonl")
+    kept, duplicated, _ = online_report.dedupe(host)
+    assert duplicated == 0
+    assert not any(h.get("paired") for h in kept)
+
+
+def test_two_different_tables_are_both_counted(tmp_path):
+    """Dedupe must not swallow real hands: a different table is a different
+    match, even with the same score progression."""
+    first = _account(tmp_path, "host-1", 0, "frames_a.jsonl")
+    second = _account(tmp_path, "host-1", 0, "frames_b.jsonl",
+                      started="2026-09-16T15:30:00")
+
+    kept, duplicated, _ = online_report.dedupe(first + second)
+    assert len(kept) == 6 and duplicated == 0
+
+
+def test_our_two_accounts_on_opposite_teams_are_flagged(tmp_path):
+    """If the seating went wrong they played AGAINST each other, and those
+    hands measure us against ourselves."""
+    host = _account(tmp_path, "host-1", 0, "frames_host.jsonl")
+    other = _account(tmp_path, "guest-1", 1, "frames_guest.jsonl")
+
+    kept, duplicated, opposed = online_report.dedupe(host + other)
+
+    assert len(kept) == 3 and duplicated == 3 and opposed == 3
+    assert all(h.get("against_ourselves") for h in kept)
+    assert not any(h.get("paired") for h in kept)
+
+
+def test_older_recordings_without_a_start_time_are_left_alone(tmp_path):
+    """Everything recorded before this existed has no gameStartTime. Those
+    hands must keep being counted, not silently dropped as duplicates."""
+    frames = [_frame(0, 10, TABLE[:1]), _frame(0, 10, TABLE[:2]),
+              _frame(0, 14, TABLE)]
+    hands = online_report.analyse(_recording(tmp_path, frames))[0]
+
+    kept, duplicated, _ = online_report.dedupe(hands + hands)
+    assert len(kept) == 2 * len(hands) and duplicated == 0
+
+
 def _table_frame(phase, table, rnd, bot_seats=()):
     """Us at seat 0 (seat 2 is our partner). `bot_seats` are played by belot.md's bot."""
     players = [{"id": f"p{i}", "position": i, "bot": i in bot_seats} for i in range(4)]

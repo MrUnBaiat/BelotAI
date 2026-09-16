@@ -258,6 +258,64 @@ def reconcile(table, rows):
     return problems
 
 
+def hand_key(span, table, row):
+    """A name for one scored hand, identical in both accounts' recordings.
+
+    When our two accounts play the same table, each records the whole match
+    from its own seat, so every hand is written down twice. `gameStartTime`
+    names the table, the row index names the hand within it, and the row's own
+    cells guard against two tables that happened to start in the same second.
+
+    Deliberately no player ids: this has to work without identifying anyone.
+    """
+    started = None
+    for r in span:
+        started = (r.get("state") or {}).get("gameStartTime") or started
+    cells = tuple(str(c) for c in row) if isinstance(row, list) else ()
+    return (started, len(table), cells)
+
+
+def span_pid(span):
+    """Whose recording this is -- compared, never printed."""
+    for r in span:
+        if r.get("pid") is not None:
+            return str(r["pid"])
+    return None
+
+
+def dedupe(hands):
+    """Drop the second copy of a hand two of our accounts both recorded.
+
+    Counting both would double n and shrink every interval by ~sqrt(2) for
+    nothing: the copies are one hand seen twice, perfectly correlated, not two
+    observations. And the fact that a copy exists is itself the finding -- it
+    means our own account was the partner, which is the whole point of playing
+    as a pair, so the survivor is tagged `paired`.
+    """
+    kept, first_by_key, dropped, opposed = [], {}, 0, 0
+    for h in hands:
+        key = h.get("key")
+        if key is None or key[0] is None:
+            kept.append(h)                   # cannot be matched up; keep it
+            continue
+        first = first_by_key.get(key)
+        if first is None:
+            first_by_key[key] = h
+            kept.append(h)
+            continue
+
+        dropped += 1
+        if first.get("pid") != h.get("pid"):
+            if first.get("team") == h.get("team"):
+                first["paired"] = True
+            else:
+                # Both our accounts at one table, on OPPOSITE teams. The hand
+                # is real but it measures us against ourselves.
+                first["against_ourselves"] = True
+                opposed += 1
+    return kept, dropped, opposed
+
+
 def analyse(path):
     """One recording -> a list of per-hand results from OUR team's point of view."""
     recs = load(path)
@@ -285,6 +343,7 @@ def analyse(path):
         seats.add(seat)
         problems += reconcile(table, rows)
         team = (seat % 2) if seat is not None else 0
+        pid = span_pid(span)
         for i, (d0, d1, b0, b1) in scored:
             ours, theirs = (d0, d1) if team == 0 else (d1, d0)
             bolt_us = b0 if team == 0 else b1
@@ -292,7 +351,11 @@ def analyse(path):
             hands.append({"diff": ours - theirs, "us": ours, "them": theirs,
                           "bolt_us": bolt_us, "bolt_them": bolt_them,
                           # None: the hand predates the recording, so unobserved
-                          "bots": tags.get(i)})
+                          "bots": tags.get(i),
+                          # For matching this hand against the same hand in our
+                          # other account's recording -- see `dedupe`.
+                          "key": hand_key(span, table[:i + 1], table[i]),
+                          "team": team, "pid": pid})
 
     meta = {"file": os.path.basename(path), "seat": sorted(s for s in seats
                                                            if s is not None),
@@ -315,7 +378,8 @@ def decision_mix():
         return None
     keys = ("network", "searched", "fallback", "degraded", "infeasible",
             "solve_errors", "worlds", "melded", "hands_dealt", "tables",
-            "seat_losses", "bot_hands", "bot_partner_hands", "bot_opponent_hands")
+            "seat_losses", "bot_hands", "bot_partner_hands",
+            "bot_opponent_hands", "partner_hands")
     tot = {k: 0 for k in keys}
     sessions = 0
     worst = 0.0
@@ -360,6 +424,9 @@ def main():
         metas.append(meta)
         all_hands += hands
 
+    # Two of our accounts at one table record the same hands twice.
+    all_hands, duplicated, opposed = dedupe(all_hands)
+
     print(f"\n{'=' * 72}\nONLINE PERFORMANCE vs HUMAN OPPONENTS\n{'=' * 72}")
     print(f"  {len(paths)} recording(s), "
           f"{sum(m.get('matches', 0) for m in metas)} match(es), "
@@ -368,6 +435,13 @@ def main():
     if dropped:
         print(f"  {len(dropped)} recording(s) TRUNCATED at a seat takeover -- "
               f"everything after it was the platform bot, not us")
+    if duplicated:
+        print(f"  {duplicated} hand(s) recorded twice, by two of our own "
+              f"accounts at one table -- counted once")
+    if opposed:
+        print(f"  {opposed} of those had our two accounts on OPPOSITE teams: "
+              f"the seating went wrong, and those hands measure us against "
+              f"ourselves")
     bad = [(m, p) for m in metas for p in m.get("problems") or []]
     if bad:
         print(f"\n  SCORE TABLE DOES NOT RECONCILE -- treat every number below as "
@@ -402,9 +476,24 @@ def main():
     sig = abs(mean) > half if half == half else False
     print(f"  {'SIGNIFICANT' if sig else 'NOT significant'} at this sample size")
 
+    paired = [h for h in human if h.get("paired")]
+    if paired:
+        stranger = [h for h in human if not h.get("paired")]
+        print(f"\n  of those, with our OWN second account opposite:")
+        for label, hs in (("our own partner", paired),
+                          ("a stranger as partner", stranger)):
+            if hs:
+                d = [h["diff"] for h in hs]
+                print(f"    {label:<24s} {sum(d) / len(d):+.3f} +- {ci95(d):.3f}"
+                      f"   (n={len(d)})")
+        print("    That difference is what playing as a pair is for.")
+
     print(f"\n-- who was at the table --")
     split = [
         ("all four seats human", human),
+        ("...of which our own account was the partner", paired),
+        ("...of which a stranger was the partner",
+         [h for h in human if not h.get("paired")] if paired else []),
         ("belot.md's bot in an opponent seat",
          [h for h in all_hands if h.get("bots") and "opponent" in h["bots"]]),
         ("belot.md's bot in our partner's seat",
