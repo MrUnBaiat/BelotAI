@@ -281,7 +281,8 @@ async def one_session(agent, args):
                           table_id=args.table_id or None,
                           table_creator=args.table_creator or None,
                           partner=args.partner or None,
-                          rotation_probe=args.rotate_probe or None)
+                          rotation_probe=args.rotate_probe or None,
+                          leave_probe=args.leave_probe or None)
     bot = SupervisedBot(cfg, agent=agent, partner=args.partner)
 
     started_at, started = _now(), time.monotonic()
@@ -506,6 +507,11 @@ def main():
                     help="our other account's username. Only used to count "
                          "the hands it partnered us for; nothing about the "
                          "other players is recorded")
+    ap.add_argument("--leave-probe", type=int, default=0, metavar="N",
+                    help="diagnostic: abandon the first N tables on purpose, "
+                         "as soon as the partner sits and before any stranger "
+                         "joins, to verify the leave-and-recreate path without "
+                         "ejecting anyone. Host only; 0 = off")
     ap.add_argument("--rotate-probe", type=int, default=0, metavar="N",
                     help="diagnostic: rotate the seats N times before playing, "
                          "even when they are already correct, logging the "

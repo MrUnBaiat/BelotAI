@@ -38,7 +38,7 @@ def _args(**kw):
                 # Playing as a pair. The defaults are the single-account run:
                 # no label, the SDK's own credentials file, the lobby pick.
                 account=None, env=None, table="lobby", table_creator=None,
-                table_id=None, partner=None, rotate_probe=0)
+                table_id=None, partner=None, rotate_probe=0, leave_probe=0)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
