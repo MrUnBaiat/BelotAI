@@ -384,6 +384,11 @@ def decision_mix():
     sessions = 0
     worst = 0.0
     stops = collections.Counter()
+    # One agent or two. Rows written before the pair existed carry no `role`,
+    # and a single-agent run records "lobby", so anything that is not a
+    # created or joined table is the old solo arrangement. Without this split
+    # the paired sessions would be averaged into 30 sessions of history.
+    groups = {"solo": collections.Counter(), "paired": collections.Counter()}
     for line in open(p, encoding="utf-8"):
         try:
             row = json.loads(line)
@@ -393,6 +398,11 @@ def decision_mix():
         worst = max(worst, float(row.get("max_decision_s") or 0.0))
         for k in keys:
             tot[k] += int(row.get(k) or 0)
+
+        kind = "paired" if row.get("role") in ("create", "join") else "solo"
+        groups[kind]["sessions"] += 1
+        for k in ("hands_dealt", "tables", "partner_hands"):
+            groups[kind][k] += int(row.get(k) or 0)
         # Rows written before seat losses were counted carry a bool instead.
         if "seat_losses" not in row and row.get("seat_lost"):
             tot["seat_losses"] += 1
@@ -400,7 +410,8 @@ def decision_mix():
             stops[row["stop_reason"]] += 1
         if row.get("error"):
             stops[f"ERROR {row['error']}"] += 1
-    tot.update(sessions=sessions, worst_decision_s=worst, stops=stops)
+    tot.update(sessions=sessions, worst_decision_s=worst, stops=stops,
+               groups=groups)
     return tot
 
 
@@ -527,6 +538,14 @@ def main():
             print(f"  hands dealt         {mix['hands_dealt']:,} "
                   f"at {mix['tables']:,} table(s)   "
                   f"({len(all_hands):,} of them scored)")
+        g = mix.get("groups") or {}
+        if (g.get("paired") or {}).get("sessions"):
+            solo, pair = g["solo"], g["paired"]
+            print(f"  one agent           {solo['sessions']:,} session(s), "
+                  f"{solo['hands_dealt']:,} hands at {solo['tables']:,} table(s)")
+            print(f"  two agents, paired  {pair['sessions']:,} session(s), "
+                  f"{pair['hands_dealt']:,} hands at {pair['tables']:,} table(s)"
+                  f"   ({pair['partner_hands']:,} with our own partner opposite)")
         if dec:
             print(f"  decisions           {dec:,}   "
                   f"network {100 * mix['network'] / dec:.1f}% / "

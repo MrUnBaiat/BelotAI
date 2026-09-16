@@ -224,6 +224,50 @@ def test_older_recordings_without_a_start_time_are_left_alone(tmp_path):
     assert len(kept) == 2 * len(hands) and duplicated == 0
 
 
+def _log(tmp_path, monkeypatch, rows):
+    (tmp_path / "log.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    monkeypatch.setattr(online_report, "SESSION_DIR", str(tmp_path))
+    return online_report.decision_mix()
+
+
+def test_solo_and_paired_sessions_are_counted_apart(tmp_path, monkeypatch):
+    """Otherwise the first paired sessions disappear into 30 sessions of
+    single-agent history, and neither number means anything afterwards."""
+    mix = _log(tmp_path, monkeypatch, [
+        {"hands_dealt": 40, "tables": 4},                       # before roles
+        {"role": "lobby", "hands_dealt": 10, "tables": 1},      # one agent
+        {"role": "create", "hands_dealt": 6, "tables": 1, "partner_hands": 6},
+        {"role": "join", "hands_dealt": 6, "tables": 1, "partner_hands": 5},
+    ])
+
+    assert mix["sessions"] == 4
+    assert mix["groups"]["solo"]["sessions"] == 2
+    assert mix["groups"]["solo"]["hands_dealt"] == 50
+    assert mix["groups"]["paired"]["sessions"] == 2
+    assert mix["groups"]["paired"]["hands_dealt"] == 12
+    assert mix["groups"]["paired"]["partner_hands"] == 11
+
+
+def test_a_history_of_solo_runs_reports_no_paired_sessions(tmp_path, monkeypatch):
+    """Every row written before the pair existed must stay in the solo
+    column, not vanish or be reclassified."""
+    mix = _log(tmp_path, monkeypatch,
+               [{"hands_dealt": 7, "tables": 1} for _ in range(3)])
+
+    assert mix["groups"]["solo"]["sessions"] == 3
+    assert mix["groups"]["paired"]["sessions"] == 0
+    assert mix["hands_dealt"] == 21
+
+
+def test_partner_hands_are_summed_from_the_log(tmp_path, monkeypatch):
+    mix = _log(tmp_path, monkeypatch, [
+        {"role": "create", "hands_dealt": 9, "partner_hands": 9},
+        {"role": "create", "hands_dealt": 4, "partner_hands": 0},
+    ])
+    assert mix["partner_hands"] == 9
+
+
 def _table_frame(phase, table, rnd, bot_seats=()):
     """Us at seat 0 (seat 2 is our partner). `bot_seats` are played by belot.md's bot."""
     players = [{"id": f"p{i}", "position": i, "bot": i in bot_seats} for i in range(4)]
