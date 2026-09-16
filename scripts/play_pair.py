@@ -41,9 +41,11 @@ PLAY_ONLINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 STRIPPED = ("BELOT_COOKIES", "BELOT_FRAMES", "BELOT_TABLE_MODE",
             "BELOT_TABLE_ID", "BELOT_TABLE_CREATOR")
 
-# The host has to be seated before the guest can find its table.
-HOST_READY_LINE = "Joined Game Room"
-HOST_WAIT_S = 120.0
+# The GUEST starts first and must already be watching the lobby before the
+# host creates anything: a fresh table is taken by strangers within seconds,
+# and a guest still loading its checkpoint loses that race every time.
+GUEST_READY_LINE = "Releasing join request"
+GUEST_WAIT_S = 120.0
 
 # A child finishes the hand in progress when interrupted; past this it is not
 # going to.
@@ -178,9 +180,13 @@ def main():
     stamp = _stamp()
     os.makedirs(SESSION_DIR, exist_ok=True)
 
+    # Guest first. It spends ten-odd seconds loading a checkpoint before its
+    # first look at the lobby, so starting the host at the same moment would
+    # have the table created -- and taken by strangers -- before anyone of
+    # ours was watching for it.
     plan = [
-        ("host", args.host, args.host_env, args.guest_name, args.seed),
         ("guest", args.guest, args.guest_env, args.host_name, args.seed + 1),
+        ("host", args.host, args.host_env, args.guest_name, args.seed),
     ]
 
     procs, logs = [], []
@@ -199,15 +205,14 @@ def main():
                                           stderr=subprocess.STDOUT,
                                           creationflags=flags))
 
-            if role == "host":
-                _say("waiting for the host to be seated before the guest looks "
-                     "for its table...")
-                if wait_for_line(log_path, HOST_READY_LINE, HOST_WAIT_S,
+            if role == "guest":
+                _say("waiting for the guest to start watching the lobby...")
+                if wait_for_line(log_path, GUEST_READY_LINE, GUEST_WAIT_S,
                                  proc=procs[0]):
-                    _say("host is seated; starting the guest")
+                    _say("guest is watching; creating the table now")
                 else:
-                    _say("host is not seated yet -- starting the guest anyway; "
-                         "it waits for the table to appear")
+                    _say("guest is not watching yet -- creating the table "
+                         "anyway; it will find it on a later look")
 
         _say("both running. Ctrl-C stops them at the end of the current hand.")
         while True:

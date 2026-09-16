@@ -149,32 +149,35 @@ class FakeProc:
         self.terminated = True
 
 
-def test_the_guest_waits_for_the_host_to_be_seated(tmp_path):
-    """Looking for the table before the host has made it just burns retries."""
-    log = tmp_path / "host.log"
-    log.write_text("[SDK] Launching bridge...\n", encoding="utf-8")
+def test_the_host_waits_for_the_guest_to_be_watching(tmp_path):
+    """Creating the table before the guest is looking hands it to strangers:
+    a fresh table is taken within seconds, and the guest spends ten-odd
+    loading its checkpoint."""
+    log = tmp_path / "guest.log"
+    log.write_text("[composite] weights from ...\n", encoding="utf-8")
     clock = Clock()
 
     def sleep(d):
         clock.sleep(d)
-        log.write_text("[SDK] Joined Game Room: abc\n", encoding="utf-8")
+        log.write_text("[SDK] Connected to bridge daemon. "
+                       "Releasing join request...\n", encoding="utf-8")
 
-    assert wait_for_line(str(log), PP.HOST_READY_LINE, 10.0,
+    assert wait_for_line(str(log), PP.GUEST_READY_LINE, 10.0,
                          now=clock.now, sleep=sleep) is True
 
 
 def test_waiting_gives_up_rather_than_hanging(tmp_path):
-    log = tmp_path / "host.log"
+    log = tmp_path / "guest.log"
     log.write_text("nothing useful\n", encoding="utf-8")
     clock = Clock()
-    assert wait_for_line(str(log), PP.HOST_READY_LINE, 5.0,
+    assert wait_for_line(str(log), PP.GUEST_READY_LINE, 5.0,
                          now=clock.now, sleep=clock.sleep) is False
 
 
-def test_waiting_stops_early_if_the_host_died(tmp_path):
+def test_waiting_stops_early_if_the_guest_died(tmp_path):
     clock = Clock()
     dead = FakeProc(exit_after=0)
-    assert wait_for_line(str(tmp_path / "missing.log"), PP.HOST_READY_LINE,
+    assert wait_for_line(str(tmp_path / "missing.log"), PP.GUEST_READY_LINE,
                          60.0, proc=dead, now=clock.now,
                          sleep=clock.sleep) is False
     assert clock.now() == 0.0, "should not have waited at all"
