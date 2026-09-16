@@ -38,7 +38,7 @@ def _args(**kw):
                 # Playing as a pair. The defaults are the single-account run:
                 # no label, the SDK's own credentials file, the lobby pick.
                 account=None, env=None, table="lobby", table_creator=None,
-                table_id=None, partner=None)
+                table_id=None, partner=None, rotate_probe=0)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -402,6 +402,40 @@ def _partner_bot(partner="MyOtherAccount", my_pos=0):
 def _seats(names):
     return {"currentPhase": 10,
             "players": [{"id": str(i), "name": n} for i, n in enumerate(names)]}
+
+
+def test_a_break_signal_stops_us_as_gracefully_as_ctrl_c(monkeypatch):
+    """THE BUG: the pair launcher stops a child with CTRL_BREAK_EVENT -- the
+    only interrupt Windows can send to one process group -- and Python's
+    default SIGBREAK action kills the process outright. The stretch's `finally`
+    never ran, so the guest's entire session row was lost every single time the
+    pair stopped."""
+    registered = {}
+    monkeypatch.setattr(P.signal, "signal",
+                        lambda sig, handler: registered.__setitem__(sig, handler))
+
+    P._install_sigint()
+
+    assert P.signal.SIGINT in registered
+    brk = getattr(P.signal, "SIGBREAK", None)
+    if brk is not None:                      # Windows
+        assert brk in registered, "a break signal would kill us mid-row"
+        assert registered[brk] is registered[P.signal.SIGINT], (
+            "both interrupts must take the same graceful path")
+
+
+def test_an_interrupt_asks_for_a_graceful_stop_once(monkeypatch):
+    """The first interrupt sets the flag the watchdog polls; it must not raise,
+    or the row is lost exactly as before."""
+    monkeypatch.setattr(P, "_interrupted", False)
+    captured = {}
+    monkeypatch.setattr(P.signal, "signal",
+                        lambda sig, handler: captured.setdefault("h", handler))
+
+    P._install_sigint()
+    captured["h"](2, None)                   # first Ctrl-C
+
+    assert P._interrupted is True
 
 
 def test_hands_our_own_account_partnered_us_for_are_counted():

@@ -279,7 +279,9 @@ async def one_session(agent, args):
                           reconnect=not args.once,
                           table_mode=args.table,
                           table_id=args.table_id or None,
-                          table_creator=args.table_creator or None)
+                          table_creator=args.table_creator or None,
+                          partner=args.partner or None,
+                          rotation_probe=args.rotate_probe or None)
     bot = SupervisedBot(cfg, agent=agent, partner=args.partner)
 
     started_at, started = _now(), time.monotonic()
@@ -418,16 +420,26 @@ async def supervise(agent, args, run_session=None):
 
 def _install_sigint():
     """First Ctrl-C asks to stop at the end of the hand; a second one stops now."""
+    # SIGBREAK as well as SIGINT. The pair launcher stops a child with
+    # CTRL_BREAK_EVENT (the only interrupt Windows can send to ONE process
+    # group), and Python's default action for SIGBREAK is to die on the spot:
+    # the stretch's `finally` never ran, so the guest's whole session row --
+    # hands, decisions, timings -- was lost every time the pair stopped.
+    stoppable = [s for s in (signal.SIGINT, getattr(signal, "SIGBREAK", None))
+                 if s is not None]
+
     def handler(signum, frame):
         global _interrupted
         if _interrupted:
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            for sig in stoppable:
+                signal.signal(sig, signal.SIG_DFL)
             raise KeyboardInterrupt
         _interrupted = True
         _say("interrupt received -- finishing the current hand. "
              "Press Ctrl-C again to stop immediately.")
-    with contextlib.suppress(ValueError, OSError):   # not the main thread
-        signal.signal(signal.SIGINT, handler)
+    for sig in stoppable:
+        with contextlib.suppress(ValueError, OSError):   # not the main thread
+            signal.signal(sig, handler)
 
 
 def main():
@@ -494,6 +506,11 @@ def main():
                     help="our other account's username. Only used to count "
                          "the hands it partnered us for; nothing about the "
                          "other players is recorded")
+    ap.add_argument("--rotate-probe", type=int, default=0, metavar="N",
+                    help="diagnostic: rotate the seats N times before playing, "
+                         "even when they are already correct, logging the "
+                         "layout before and after each one. Host only. This is "
+                         "how CHANGE_PLAYERS_POSITION gets verified; 0 = off")
     args = ap.parse_args()
 
     if args.table == "join" and not (args.table_creator or args.table_id):
