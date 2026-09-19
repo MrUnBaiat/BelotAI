@@ -43,11 +43,38 @@ def test_a_cancelled_deal_is_not_a_hand():
 
 
 def test_totals_reconcile_with_the_final_row():
-    """The arithmetic check that catches all three traps at once: summing the
-    per-hand deltas must land exactly on the table's own last cumulative row."""
+    """Summing the per-hand deltas must land on what the team ACTUALLY has.
+
+    Team 1's markers here are BT-1, BT-2, BT-3 in sequence -- a real third bolt
+    -- so its true total is 62 - 10 = 52. This assertion used to read 62, the
+    value you get by carrying the cumulative forward across every bolt marker
+    alike, which is exactly the defect the last row exists to expose. The test
+    was encoding the bug rather than catching it.
+    """
     rows = per_hand(REAL)
     assert round(sum(r[0] for r in rows)) == 108
-    assert round(sum(r[1] for r in rows)) == 62
+    assert round(sum(r[1] for r in rows)) == 52, "the third bolt costs ten"
+
+
+def test_a_third_bolt_costs_ten_and_the_marker_hides_it():
+    """Captured live: a match ending [139, 'BT-2'] then [159, 'BT-3'], where the
+    platform showed the bolted team dropping 108 -> 98. The cell is the string
+    'BT-3' exactly like 'BT-1', so carrying the total forward -- right for the
+    first two bolts -- understates that hand by 10 and every later total with
+    it."""
+    table = [[118, 108], [139, "BT-2"], [159, "BT-3"]]
+    rows = per_hand(table)
+
+    assert rows[1][:2] == (21.0, 0.0), "a second bolt scores zero, no penalty"
+    assert rows[2][:2] == (20.0, -10.0), "the third bolt costs the team ten"
+    assert rows[2][3] is True, "and is still flagged as a bolt"
+
+
+def test_a_sixth_bolt_is_penalised_too():
+    """The platform may keep counting rather than relabelling, so the rule is
+    every third bolt, not the literal string 'BT-3'."""
+    assert per_hand([[10, 20], [10, "BT-6"]])[1][:2] == (0.0, -10.0)
+    assert per_hand([[10, 20], [10, "BT-4"]])[1][:2] == (0.0, 0.0)
 
 
 def test_a_bolted_team_scores_zero_not_a_marker():

@@ -178,8 +178,17 @@ def _scored_rows(table):
         cur, bolted = [], [False, False]
         for t in (0, 1):
             cell = row[t]
-            if bolt_marker(cell) is not None:
-                cur.append(prev[t])
+            n = bolt_marker(cell)
+            if n is not None:
+                # A bolt scores zero, so the cumulative carries forward -- EXCEPT
+                # the third, which costs a further 10 and is invisible here
+                # because the cell is the string 'BT-3' rather than a number.
+                # Carrying it forward understates that hand's swing by 10 and
+                # every later total with it. Same rule as the SDK's
+                # `sync.py:_decode_score_table`, including the modulo, which
+                # catches it whether the platform keeps counting (BT-3, BT-6)
+                # or relabels from BT-1 after every third.
+                cur.append(prev[t] - 10 if n and n % 3 == 0 else prev[t])
                 bolted[t] = True
             elif isinstance(cell, (int, float)) and not isinstance(cell, bool):
                 cur.append(float(cell))
