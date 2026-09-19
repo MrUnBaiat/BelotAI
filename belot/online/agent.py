@@ -197,6 +197,10 @@ class CompositeAgent:
 
         legal = np.flatnonzero(np.asarray(legal_mask))
         c_pub, bela_hidden, pair = self._combination_points(state)
+        if self._third_bolt_at_stake(state):
+            # Counted once per decision, so a session row says how often the
+            # extra 10 was actually in play.
+            self.stats["third_bolt"] = self.stats.get("third_bolt", 0) + 1
         totals = np.zeros(38, dtype=np.float64)
         solved = 0
 
@@ -243,7 +247,33 @@ class CompositeAgent:
         live search is the same computation rather than a reimplementation of it.
         `c` is the combination points this world is scored with.
         """
-        return solve_world_for(state, seat, hands, legal, c=c)
+        return solve_world_for(state, seat, hands, legal, c=c,
+                               third_bolt=self._third_bolt_at_stake(state))
+
+    @staticmethod
+    def _third_bolt_at_stake(state):
+        """Would a bolt of the declaring team this hand be its THIRD?
+
+        A third bolt costs a further 10 on top of the 16 conceded. Scored without
+        it, the search valued the most dangerous hands of all 10 points too
+        cheaply -- the offline env always passed it (`env.py`), the live path
+        never did, although the SDK tracks the count correctly on
+        `state.bolts_by_team`.
+
+        Only the declaring team can be bolted, and the SDK keeps each count
+        modulo 3 (it resets after the penalty), so 2 means the next one is the
+        third: the same test `env.py` makes. The declaring team is derived the
+        way `solve_world_for` derives it, so the two can never disagree about
+        whose bolt this would be.
+        """
+        declarer = getattr(state, "declarer", None)
+        if declarer is None:
+            return False
+        declaring_team = getattr(state, "declaring_team", None)
+        if declaring_team is None:
+            declaring_team = declarer % 2
+        bolts = getattr(state, "bolts_by_team", None) or (0, 0)
+        return bolts[declaring_team] == 2
 
     # --------------------------------------------------------- combinations
     @staticmethod

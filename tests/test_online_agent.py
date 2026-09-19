@@ -22,6 +22,7 @@ import pytest
 
 from belotmd.game.state import BelotState
 
+import belot.online.agent as agent_mod
 from belot.online.agent import SEARCH_FROM_TRICK, CompositeAgent
 
 
@@ -70,6 +71,65 @@ def _act(agent, state):
     action = agent.act(state, 0, [0, 0], mask)
     assert mask[action], f"returned masked-out action {action}"
     return action
+
+
+# ----------------------------------------------------------- the third bolt
+def _bolt_state(bolts, declarer=0):
+    """Late in a hand, our team (seat 0) declaring and unable to reach 81: a
+    bolt is certain in every world."""
+    s = _mid_hand(6)                       # two cards each, eight left
+    s.declarer = declarer
+    s.declaring_team = None                # as the SDK leaves it live
+    s.raw_points_by_team = [0, 140]        # at most ~40 more to take
+    s.bolts_by_team = list(bolts)
+    return s
+
+
+@pytest.mark.parametrize("bolts,expected", [
+    ((0, 0), False), ((1, 0), False), ((2, 0), True), ((0, 2), False)])
+def test_the_third_bolt_is_the_declaring_teams(bolts, expected):
+    """Only the declaring team can be bolted, so only its count matters -- and
+    the SDK keeps it modulo 3, so 2 means the next one is the third."""
+    assert CompositeAgent._third_bolt_at_stake(_bolt_state(bolts)) is expected
+
+
+def test_the_declaring_team_follows_the_declarer_seat():
+    """Live states carry no declaring_team; the declarer's seat decides it,
+    exactly as solve_world_for derives it."""
+    assert CompositeAgent._third_bolt_at_stake(_bolt_state((0, 2), declarer=1))
+    assert not CompositeAgent._third_bolt_at_stake(_bolt_state((2, 0), declarer=1))
+
+
+def test_the_live_search_hands_it_to_the_solver(monkeypatch):
+    """THE GAP: the offline env always passed third_bolt and the live path never
+    did, although the SDK tracks the count on the state it hands us."""
+    seen = {}
+
+    def spy(position, seat, hands, legal, c=(0, 0), third_bolt=False):
+        seen["third_bolt"] = third_bolt
+        return np.zeros(len(legal))
+    monkeypatch.setattr(agent_mod, "solve_world_for", spy)
+
+    a = CompositeAgent(worlds=1, device="cpu", seed=0)
+    s = _bolt_state((2, 0))
+    a._solve_world(s, 0, [list(h) for h in s.hands], np.array([s.hands[0][0]]))
+
+    assert seen["third_bolt"] is True
+
+
+def test_a_third_bolt_costs_the_search_ten_more_end_to_end():
+    """Through the real solver: a bolt is certain here, so every card scores the
+    same -- 16 conceded normally, 26 once it would be the third."""
+    a = CompositeAgent(worlds=1, device="cpu", seed=0)
+    base = _bolt_state((0, 0))
+    legal = np.flatnonzero(base.get_legal_actions())
+    hands = [list(h) for h in base.hands]
+
+    ordinary = a._solve_world(_bolt_state((0, 0)), 0, hands, legal)
+    third = a._solve_world(_bolt_state((2, 0)), 0, hands, legal)
+
+    assert np.allclose(ordinary, -16.0), ordinary
+    assert np.allclose(third, -26.0), third
 
 
 def test_early_tricks_go_to_the_network():
