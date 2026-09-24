@@ -57,6 +57,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from belotmd import Config
 from belotmd.bot import LiveBelotBot
+from belotmd.platform.client import TableCreationRefused
+from belotmd.platform import protocol
 
 from belot.online.agent import CompositeAgent
 from belot.search.composite import DEFAULT_D
@@ -85,13 +87,6 @@ HAND_GRACE_S = 150.0
 # creating tables at all (2026-09-19, a whole 9-hour run lost to it). A match to 101
 # runs ~9-17 hands, 10-20 minutes; past this grace we fall back to a hand boundary.
 MATCH_GRACE_S = 30 * 60.0
-
-# Phases with no match in progress: 0 before one starts, 14 once it has ended.
-# Measured on 14 recordings -- phase 0 never led back into the same match (0/916),
-# phase 14 always led to a new one (67/67); 13 is only the gap between two HANDS.
-# The SDK has the same rule (`protocol.between_matches`), but CI installs an older
-# pinned SDK, so importing it here would break every test at import time.
-MATCH_BOUNDARY_PHASES = (0, 14)
 
 # Set by SIGINT. Polled by the watchdog so a Ctrl-C stops at the end of the
 # MATCH rather than abandoning three humans mid-match. Press twice to stop now.
@@ -165,13 +160,15 @@ class SupervisedBot(LiveBelotBot):
         """Can this bot leave now without abandoning a match?
 
         True when it is not seated anywhere, or its table is before a match or
-        after one (`MATCH_BOUNDARY_PHASES`). A table we have just joined, with no
-        frame from it yet, counts as before a match.
+        after one -- `protocol.between_matches` owns that rule (phases 0 and 14,
+        never 13, which is only the gap between two HANDS). A table we have just
+        joined, with no frame from it yet, counts as before a match.
         """
         client = getattr(self, "client", None)
         if client is None or not getattr(client, "_in_room", False):
             return True
-        return self.last_phase in (None, *MATCH_BOUNDARY_PHASES)
+        return (self.last_phase is None
+                or protocol.between_matches(self.last_phase))
 
     def _note_partner(self, raw_state):
         """Record the hands our own second account sat opposite us for.
@@ -337,6 +334,7 @@ async def one_session(agent, args):
     started_at, started = _now(), time.monotonic()
     deadline = started + args.hours * 3600
     error = None
+    create_refused = False
     reason = "?"
     losses = 0
     idle = False
@@ -360,6 +358,7 @@ async def one_session(agent, args):
         if task.done() and not task.cancelled() and task.exception():
             exc = task.exception()
             error = f"{type(exc).__name__}: {exc}"
+            create_refused = isinstance(exc, TableCreationRefused)
             _say(f"session raised: {error}")
 
         dur = time.monotonic() - started
@@ -385,6 +384,9 @@ async def one_session(agent, args):
             "stop_reason": reason,
             "max_decision_s": round(agent.max_decision_s, 3),
             "error": error,
+            # A flag rather than a match on the message: the row is JSON, and
+            # the type is what the SDK actually raised.
+            "create_refused": create_refused,
             **{k: int(v) for k, v in agent.stats.items()},
         }
         _log_session(row)
@@ -432,9 +434,7 @@ async def supervise(agent, args, run_session=None):
         else:
             seat_losses = 0
 
-        # Matched by NAME: the exception lives in the SDK, and CI installs an older
-        # pinned SDK that does not have it.
-        if (row.get("error") or "").startswith("TableCreationRefused"):
+        if row.get("create_refused"):
             stop = ("belot.md refused to create tables -- it does this after too "
                     "many matches were left before they finished; try again later")
             break

@@ -29,6 +29,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import scripts.play_online as P
+from belotmd.platform.client import TableCreationRefused
 from scripts.play_online import supervise
 
 
@@ -316,21 +317,34 @@ def test_a_refused_table_create_ends_the_run(monkeypatch):
     """belot.md stops an account creating tables after it has left too many
     matches mid-game. Nothing can play until it lifts, so going round again
     after a break only repeats the failure."""
-    row = {**_row(), "error": "TableCreationRefused: belot.md refused ..."}
+    row = {**_row(), "create_refused": True}
     runner = _runner([row])
     stop = _run(_args(), runner, monkeypatch)
     assert "refused to create tables" in stop
     assert len(runner.calls) == 1
 
 
-def test_the_refusal_reaches_the_row_by_name(tmp_path, monkeypatch):
-    """The supervisor recognises it by class NAME, because CI installs an older
-    pinned SDK that does not define it."""
-    class TableCreationRefused(RuntimeError):
-        pass
+def test_an_ordinary_session_error_does_not_end_the_run(monkeypatch):
+    """Only THAT error is terminal. A dropped connection is a bad night, not a
+    locked account, and the run should go round again after its break."""
+    row = {**_row(), "error": "ConnectionClosedError: no close frame received"}
+    runner = _runner([row, _row(), _row()])
+    _run(_args(max_sessions=3), runner, monkeypatch)
+    assert len(runner.calls) == 3
+
+
+def test_the_refusal_is_flagged_on_the_row(tmp_path, monkeypatch):
+    """Flagged by TYPE, from the SDK's own exception -- the row itself is JSON,
+    so the flag rather than the class travels with it."""
     row, _, _ = _one_session(tmp_path, monkeypatch,
                              raises=TableCreationRefused("refused 3 times"))
+    assert row["create_refused"] is True
     assert row["error"].startswith("TableCreationRefused")
+
+
+def test_an_ordinary_failure_is_not_flagged_as_a_refusal(tmp_path, monkeypatch):
+    row, _, _ = _one_session(tmp_path, monkeypatch, raises=RuntimeError("boom"))
+    assert row["create_refused"] is False
 
 
 # ------------------------------------------------------------ one_session()
