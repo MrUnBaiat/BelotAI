@@ -37,8 +37,10 @@ deliberately does not:
      same 5-minute retry, silently, all night. So a run with no frames at all for
      `--max-idle-min` stops and says so.
 
-Stopping is always deferred to a HAND BOUNDARY where possible. Walking out mid-trick
-costs the seat and leaves three humans waiting.
+Stopping is always deferred to the end of the current MATCH where possible, falling
+back to a hand boundary only if a match will not end. belot.md penalises leaving
+matches before they finish -- enough of it and the account cannot create tables --
+and walking out mid-trick costs the seat and leaves three humans waiting.
 """
 
 import argparse
@@ -78,8 +80,21 @@ POLL_S = 1.0
 # ~90 s; past this, whatever we were waiting for is not coming.
 HAND_GRACE_S = 150.0
 
-# Set by SIGINT. Polled by the watchdog so a Ctrl-C stops at the end of the hand
-# rather than abandoning three humans mid-trick. Press twice to stop now.
+# Every planned stop waits for the end of the current MATCH, not the hand: belot.md
+# penalises leaving a match before it finishes, and enough of it stops the account
+# creating tables at all (2026-09-19, a whole 9-hour run lost to it). A match to 101
+# runs ~9-17 hands, 10-20 minutes; past this grace we fall back to a hand boundary.
+MATCH_GRACE_S = 30 * 60.0
+
+# Phases with no match in progress: 0 before one starts, 14 once it has ended.
+# Measured on 14 recordings -- phase 0 never led back into the same match (0/916),
+# phase 14 always led to a new one (67/67); 13 is only the gap between two HANDS.
+# The SDK has the same rule (`protocol.between_matches`), but CI installs an older
+# pinned SDK, so importing it here would break every test at import time.
+MATCH_BOUNDARY_PHASES = (0, 14)
+
+# Set by SIGINT. Polled by the watchdog so a Ctrl-C stops at the end of the
+# MATCH rather than abandoning three humans mid-match. Press twice to stop now.
 _interrupted = False
 
 
@@ -136,12 +151,27 @@ class SupervisedBot(LiveBelotBot):
         # countable separately from hands with a stranger as partner.
         self.partner = (partner or "").strip().casefold() or None
         self.partner_hands = set()
+        self.last_phase = None           # the table's phase in the latest frame
 
     async def on_state_update(self, raw_state, my_player_id):
         self.frames_seen += 1
+        self.last_phase = raw_state.get("currentPhase")
         await super().on_state_update(raw_state, my_player_id)
         self._note_bot_seats(raw_state)
         self._note_partner(raw_state)
+
+    @property
+    def between_matches(self):
+        """Can this bot leave now without abandoning a match?
+
+        True when it is not seated anywhere, or its table is before a match or
+        after one (`MATCH_BOUNDARY_PHASES`). A table we have just joined, with no
+        frame from it yet, counts as before a match.
+        """
+        client = getattr(self, "client", None)
+        if client is None or not getattr(client, "_in_room", False):
+            return True
+        return self.last_phase in (None, *MATCH_BOUNDARY_PHASES)
 
     def _note_partner(self, raw_state):
         """Record the hands our own second account sat opposite us for.
@@ -200,15 +230,23 @@ def _say(msg):
 async def _watch(bot, agent, args, deadline, task):
     """Supervise a running bot. Returns (reason, seat_losses, idle).
 
-    Every stop is decided here and then DEFERRED to the next hand boundary, so the
-    only thing this returns early for is the run ending by itself.
+    Every stop is decided here and then DEFERRED to the end of the current MATCH,
+    so the only thing this returns early for is the run ending by itself. belot.md
+    penalises leaving matches before they finish -- enough of it and the account
+    cannot create tables at all -- so one stretch ending mid-match can cost every
+    stretch after it.
+
+    While a stop is pending the bot is told not to ready up for another match
+    (`stop_requested`), so the table cannot start one we would then walk out of.
+    If no match ends within MATCH_GRACE_S this falls back to the next hand
+    boundary, and HAND_GRACE_S after that stops regardless.
     """
     losses = 0
     was_lost = False
     last_seen = -1
     last_progress = time.monotonic()
     idle_limit = args.max_idle_min * 60
-    want = want_since = None
+    want = want_since = fallback_since = None
     idle = False
 
     while True:
@@ -247,12 +285,23 @@ async def _watch(bot, agent, args, deadline, task):
                 want = "stretch over"
             if want is not None:
                 want_since = now
-                agent.at_hand_boundary = False       # wait for the NEXT one
-                _say(f"{want}; stopping at the end of this hand")
-        elif agent.at_hand_boundary:
+                bot.stop_requested = True            # no new match from here on
+                _say(f"{want}; stopping at the end of this match")
+        elif getattr(bot, "between_matches", True):
             return want, losses, idle
-        elif now - want_since > HAND_GRACE_S:
-            return f"{want} (no hand boundary within {HAND_GRACE_S:.0f}s)", losses, idle
+        elif now - want_since <= MATCH_GRACE_S:
+            continue
+        elif fallback_since is None:
+            fallback_since = now
+            agent.at_hand_boundary = False           # wait for the NEXT one
+            _say(f"{want}; no match end within {MATCH_GRACE_S / 60:.0f} min -- "
+                 f"stopping at the end of this hand instead")
+        elif agent.at_hand_boundary:
+            return (f"{want} (no match end within {MATCH_GRACE_S / 60:.0f} min; "
+                    f"stopped at a hand boundary)"), losses, idle
+        elif now - fallback_since > HAND_GRACE_S:
+            return (f"{want} (no match or hand boundary within "
+                    f"{(MATCH_GRACE_S + HAND_GRACE_S) / 60:.0f} min)"), losses, idle
 
 
 async def one_session(agent, args):
@@ -383,6 +432,12 @@ async def supervise(agent, args, run_session=None):
         else:
             seat_losses = 0
 
+        # Matched by NAME: the exception lives in the SDK, and CI installs an older
+        # pinned SDK that does not have it.
+        if (row.get("error") or "").startswith("TableCreationRefused"):
+            stop = ("belot.md refused to create tables -- it does this after too "
+                    "many matches were left before they finished; try again later")
+            break
         if row.get("stopped_for_idle"):
             stop = "nothing to play for a long time -- check the login cookie"
             break
@@ -420,7 +475,7 @@ async def supervise(agent, args, run_session=None):
 
 
 def _install_sigint():
-    """First Ctrl-C asks to stop at the end of the hand; a second one stops now."""
+    """First Ctrl-C asks to stop at the end of the match; a second one stops now."""
     # SIGBREAK as well as SIGINT. The pair launcher stops a child with
     # CTRL_BREAK_EVENT (the only interrupt Windows can send to ONE process
     # group), and Python's default action for SIGBREAK is to die on the spot:
@@ -436,7 +491,7 @@ def _install_sigint():
                 signal.signal(sig, signal.SIG_DFL)
             raise KeyboardInterrupt
         _interrupted = True
-        _say("interrupt received -- finishing the current hand. "
+        _say("interrupt received -- finishing the current match. "
              "Press Ctrl-C again to stop immediately.")
     for sig in stoppable:
         with contextlib.suppress(ValueError, OSError):   # not the main thread
@@ -470,11 +525,11 @@ def main():
     ap.add_argument("--break-min", type=float, default=20.0)
     ap.add_argument("--max-seat-losses", type=int, default=3)
     ap.add_argument("--max-short", type=int, default=5)
-    ap.add_argument("--max-idle-min", type=float, default=120.0,
-                    help="stop after this long with no frames at all. The SDK "
-                         "retries an empty lobby every 5 min forever, and an "
+    ap.add_argument("--max-idle-min", type=float, default=60.0,
+                    help="end the RUN after this long with no frames at all. The "
+                         "SDK retries an empty lobby every 5 min forever, and an "
                          "expired cookie looks exactly the same from out here "
-                         "(default 120, about 24 retries)")
+                         "(default 60, about 12 retries)")
     ap.add_argument("--max-sessions", type=int, default=0,
                     help="0 = unlimited")
     ap.add_argument("--once", action="store_true",

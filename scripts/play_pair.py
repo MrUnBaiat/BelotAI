@@ -47,9 +47,9 @@ STRIPPED = ("BELOT_COOKIES", "BELOT_FRAMES", "BELOT_TABLE_MODE",
 GUEST_READY_LINE = "Releasing join request"
 GUEST_WAIT_S = 120.0
 
-# A child finishes the hand in progress when interrupted; past this it is not
+# A child finishes the match in progress when interrupted; past this it is not
 # going to.
-STOP_GRACE_S = 180.0
+STOP_GRACE_S = 35 * 60.0      # longer than a child's own match grace (30 min)
 POLL_S = 1.0
 
 
@@ -119,9 +119,9 @@ def wait_for_line(path, needle, timeout_s, proc=None, poll_s=POLL_S,
 
 
 def interrupt(proc):
-    """Ask a child to stop at the end of its hand.
+    """Ask a child to stop at the end of its match.
 
-    play_online traps the interrupt and finishes the hand rather than
+    play_online traps the interrupt and finishes the match rather than
     abandoning three humans mid-trick, so this is never a kill.
     """
     try:
@@ -214,7 +214,7 @@ def main():
                     _say("guest is not watching yet -- creating the table "
                          "anyway; it will find it on a later look")
 
-        _say("both running. Ctrl-C stops them at the end of the current hand.")
+        _say("both running. Ctrl-C stops them at the end of the current match.")
         while True:
             done = [p for p in procs if p.poll() is not None]
             if done:
@@ -226,7 +226,7 @@ def main():
             time.sleep(POLL_S)
 
     except KeyboardInterrupt:
-        _say("interrupted -- both children will finish the current hand")
+        _say("interrupted -- both children will finish the current match")
     finally:
         killed = stop_all(procs)
         if killed:

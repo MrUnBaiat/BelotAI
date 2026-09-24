@@ -66,6 +66,14 @@ def test_children_run_unbuffered():
     assert argv.index("-u") < argv.index(PP.PLAY_ONLINE)
 
 
+def test_the_launcher_waits_for_a_match_to_end_before_killing():
+    """Each bot now finishes its MATCH before stopping. A launcher that killed
+    after the old 3-minute grace would cut that short -- walking out mid-match,
+    the very thing the platform penalises."""
+    import scripts.play_online as P
+    assert PP.STOP_GRACE_S > P.MATCH_GRACE_S + P.HAND_GRACE_S
+
+
 def test_each_child_reads_its_own_credentials_file():
     assert _opt(_host()[0], "--env") == ".env.alpha"
     assert _opt(_guest()[0], "--env") == ".env.beta"

@@ -147,12 +147,22 @@ def test_an_interrupt_stops_after_the_current_stretch(monkeypatch):
 # ----------------------------------------------------------------- _watch()
 
 class FakeBot:
-    def __init__(self, frames=True, lost_at=()):
+    def __init__(self, frames=True, lost_at=(), match_end_at=None):
         self.frames_seen = 0
         self.seat_bot_controlled = False
+        self.stop_requested = False
         self._frames = frames
         self._lost_at = set(lost_at)
+        self._match_end_at = match_end_at
         self.ticks = 0
+
+    @property
+    def between_matches(self):
+        """No frames means not seated anywhere. Otherwise mid-match until
+        `match_end_at` -- or for ever, if that is None."""
+        if not self._frames:
+            return True
+        return self._match_end_at is not None and self.ticks >= self._match_end_at
 
     def tick(self):
         self.ticks += 1
@@ -196,9 +206,8 @@ def test_a_takeover_is_seen_while_the_run_is_still_going(monkeypatch):
     """`bot.run()` no longer returns between tables, and the SDK clears this flag
     when it joins a fresh one -- so a takeover counted only at the end is a
     takeover never counted at all."""
-    bot = FakeBot(lost_at=range(5, 4000))
-    reason, losses, idle = _watch(bot, _args(max_seat_losses=1), monkeypatch,
-                                  boundary_at=10)
+    bot = FakeBot(lost_at=range(5, 4000), match_end_at=10)
+    reason, losses, idle = _watch(bot, _args(max_seat_losses=1), monkeypatch)
     assert losses == 1
     assert "seat was lost" in reason
     assert not idle
@@ -207,28 +216,47 @@ def test_a_takeover_is_seen_while_the_run_is_still_going(monkeypatch):
 def test_each_takeover_is_counted_once_not_once_per_poll(monkeypatch):
     """The flag is level, not an edge. Counting polls instead of transitions
     would hit any limit within a second of the first takeover."""
-    bot = FakeBot(lost_at={5, 6, 7, 20, 21})
-    reason, losses, _ = _watch(bot, _args(max_seat_losses=2), monkeypatch,
-                               boundary_at=25)
+    bot = FakeBot(lost_at={5, 6, 7, 20, 21}, match_end_at=25)
+    reason, losses, _ = _watch(bot, _args(max_seat_losses=2), monkeypatch)
     assert losses == 2
 
 
-def test_stopping_waits_for_the_end_of_the_hand(monkeypatch):
-    """Walking out mid-trick forfeits the seat and leaves three humans waiting."""
-    bot = FakeBot(lost_at=range(5, 4000))
+def test_stopping_waits_for_the_end_of_the_match_not_the_hand(monkeypatch):
+    """THE LOCK-OUT: stopping at the end of a HAND walks out of the match, which
+    belot.md penalises -- enough of it and the account can no longer create
+    tables, which cost a whole nine-hour run on 2026-09-19."""
+    bot = FakeBot(lost_at=range(5, 4000), match_end_at=100)
     reason, _, _ = _watch(bot, _args(max_seat_losses=1), monkeypatch,
-                          boundary_at=100)    # within the grace period
-    assert bot.ticks == 100                   # not 5
-    assert "no hand boundary" not in reason
+                          boundary_at=20)     # a hand ends long before the match
+    assert bot.ticks == 100, "left at a hand boundary, mid-match"
+    assert "hand boundary" not in reason
 
 
-def test_a_hand_that_never_ends_does_not_trap_the_run(monkeypatch):
-    """...but only up to a point: past the grace period we stop anyway."""
+def test_a_pending_stop_forbids_readying_up_for_another_match(monkeypatch):
+    """Otherwise the next match can deal in the second between the last one
+    ending and the watchdog noticing, and we are mid-match again."""
+    bot = FakeBot(lost_at=range(5, 4000), match_end_at=50)
+    _watch(bot, _args(max_seat_losses=1), monkeypatch)
+    assert bot.stop_requested is True
+
+
+def test_a_match_that_will_not_end_falls_back_to_a_hand_boundary(monkeypatch):
+    """...but only up to a point: past the match grace, the next hand
+    boundary will do."""
+    bot = FakeBot(lost_at=range(5, 4000))          # the match never ends
+    reason, _, _ = _watch(bot, _args(max_seat_losses=1), monkeypatch,
+                          boundary_at=10)
+    assert "stopped at a hand boundary" in reason
+    assert bot.ticks <= 5 + P.MATCH_GRACE_S / P.POLL_S + 3
+
+
+def test_nothing_ending_does_not_trap_the_run(monkeypatch):
+    """No match end and no hand end either: stop regardless."""
     bot = FakeBot(lost_at=range(5, 4000))
     reason, _, _ = _watch(bot, _args(max_seat_losses=1), monkeypatch,
                           boundary_at=None)
-    assert "no hand boundary" in reason
-    assert bot.ticks <= 5 + P.HAND_GRACE_S / P.POLL_S + 2
+    assert "no match or hand boundary" in reason
+    assert bot.ticks <= 5 + (P.MATCH_GRACE_S + P.HAND_GRACE_S) / P.POLL_S + 3
 
 
 def test_silence_stops_the_run_and_is_flagged_as_idle(monkeypatch):
@@ -244,9 +272,9 @@ def test_silence_stops_the_run_and_is_flagged_as_idle(monkeypatch):
 def test_arriving_frames_keep_the_run_alive(monkeypatch):
     """The control for the test above: the same short idle limit must NOT fire
     while frames are arriving. The stretch deadline ends it instead."""
-    bot = FakeBot(frames=True)
+    bot = FakeBot(frames=True, match_end_at=1)
     reason, _, idle = _watch(bot, _args(max_idle_min=0.5, hours=100 / 3600),
-                             monkeypatch, boundary_at=1)
+                             monkeypatch)
     assert reason == "stretch over"
     assert not idle
 
@@ -260,12 +288,49 @@ def test_a_run_that_ends_by_itself_returns_at_once(monkeypatch):
     assert (losses, idle) == (0, False)
 
 
-def test_an_interrupt_is_honoured_at_the_next_hand_boundary(monkeypatch):
+def test_an_interrupt_is_honoured_at_the_end_of_the_match(monkeypatch):
+    """The first Ctrl-C, and the launcher's stop signal, which arrives the same
+    way."""
     monkeypatch.setattr(P, "_interrupted", True)
-    bot = FakeBot()
-    reason, _, _ = _watch(bot, _args(), monkeypatch, boundary_at=30)
+    bot = FakeBot(match_end_at=30)
+    reason, _, _ = _watch(bot, _args(), monkeypatch, boundary_at=10)
     assert reason == "interrupted"
-    assert bot.ticks == 30
+    assert bot.ticks == 30, "must not stop at the earlier hand boundary"
+
+
+@pytest.mark.parametrize("in_room,phase,expected", [
+    (False, 10, True),     # not seated anywhere
+    (True, None, True),    # just joined, no frame yet
+    (True, 0, True),       # before a match
+    (True, 14, True),      # a match just ended
+    (True, 13, False),     # between two HANDS of a match
+    (True, 10, False),     # mid-hand
+])
+def test_a_match_boundary_is_phase_0_or_14_or_not_seated(in_room, phase, expected):
+    fake = types.SimpleNamespace(client=types.SimpleNamespace(_in_room=in_room),
+                                 last_phase=phase)
+    assert P.SupervisedBot.between_matches.fget(fake) is expected
+
+
+def test_a_refused_table_create_ends_the_run(monkeypatch):
+    """belot.md stops an account creating tables after it has left too many
+    matches mid-game. Nothing can play until it lifts, so going round again
+    after a break only repeats the failure."""
+    row = {**_row(), "error": "TableCreationRefused: belot.md refused ..."}
+    runner = _runner([row])
+    stop = _run(_args(), runner, monkeypatch)
+    assert "refused to create tables" in stop
+    assert len(runner.calls) == 1
+
+
+def test_the_refusal_reaches_the_row_by_name(tmp_path, monkeypatch):
+    """The supervisor recognises it by class NAME, because CI installs an older
+    pinned SDK that does not define it."""
+    class TableCreationRefused(RuntimeError):
+        pass
+    row, _, _ = _one_session(tmp_path, monkeypatch,
+                             raises=TableCreationRefused("refused 3 times"))
+    assert row["error"].startswith("TableCreationRefused")
 
 
 # ------------------------------------------------------------ one_session()
